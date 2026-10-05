@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "workspaces": [
+    "packages/*",
     "apps/*"
   ],
   "engines": {
@@ -12,26 +13,35 @@
   },
   "packageManager": "npm@11.19.0",
   "scripts": {
-    "dev": "node scripts/dev.mjs",
-    "dev:web": "npm run dev --workspace @chess-room/web",
-    "dev:server": "npm run dev --workspace @chess-room/server",
+    "dev": "npm run build:packages && node scripts/dev.mjs",
+    "dev:web": "npm run build:packages && npm run dev --workspace @chess-room/web",
+    "dev:server": "npm run build:packages && npm run dev --workspace @chess-room/server",
     "format": "biome check --write .",
     "lint": "biome check .",
-    "typecheck": "npm run typecheck --workspaces",
-    "test": "vitest run",
+    "typecheck": "npm run build:packages && npm run typecheck --workspaces",
+    "test": "npm run build:packages && vitest run",
     "test:watch": "vitest",
-    "build": "npm run build --workspaces",
+    "build": "npm run build:packages && npm run build --workspace @chess-room/server && npm run build --workspace @chess-room/web",
     "verify": "npm run lint && npm run typecheck && npm test && npm run build",
     "db:up": "docker compose up -d --wait postgres",
     "db:down": "docker compose down",
-    "db:check": "docker compose exec -T postgres psql -U chess_room -d chess_room -c \"SELECT version();\""
+    "db:check": "docker compose exec -T postgres psql -U chess_room -d chess_room -c \"SELECT version();\"",
+    "build:packages": "npm run build --workspace @chess-room/contracts && npm run build --workspace @chess-room/game-core",
+    "test:integration": "npm run build:packages && node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
+    "test:e2e": "npm run build && playwright test",
+    "db:migrate": "npm run migrate --workspace @chess-room/server",
+    "start": "npm run start --workspace @chess-room/server",
+    "verify:full": "npm run verify && npm run test:integration && npm run test:e2e",
+    "benchmark": "node scripts/benchmark.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
     "@types/node": "24.19.1",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
-    "vitest": "5.0.3"
+    "vitest": "5.0.3",
+    "@types/pg": "8.23.1",
+    "@playwright/test": "1.63.0"
   },
   "files": [
     "apps/*/src/**",
@@ -48,6 +58,19 @@
     ".node-version",
     ".nvmrc",
     ".npmrc",
-    ".env.example"
+    ".env.example",
+    "packages/*/src/**",
+    "packages/*/package.json",
+    "packages/*/tsconfig*.json",
+    "apps/server/migrations/**",
+    "apps/server/scripts/**",
+    "tests/**",
+    "playwright.config.ts",
+    "vitest.integration.config.ts",
+    "infra/database/**",
+    "docs/rules.md",
+    "docs/operations.md",
+    "docs/performance.md",
+    "THIRD_PARTY_NOTICES.md"
   ]
 }

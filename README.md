@@ -1,111 +1,93 @@
 # Chess Room
 
-A website for playing chess with friends, designed to support additional
-curated game modes over time.
+Play chess with a friend in a private browser room. Choose Standard chess or
+Three-check, share an invitation, and play with display names without accounts.
 
-**Status: development foundation.** The browser setup page and API liveness
-endpoint work. Chess gameplay, invitations, sessions, realtime connections,
-database persistence and clocks are not implemented yet.
+The server validates every move and stores games in PostgreSQL. Refreshing or
+reconnecting restores the board, history, result and clock. Supported controls
+are untimed, 5+0, 10+5 and 15+10. Players can resign, offer or claim a draw,
+rematch with colors swapped, and download PGN.
 
-## Requirements
+## Run locally
 
-- Node.js 24.21.0 (24 LTS), npm 11.19.0. Versions are recorded in `.node-version`
-  and `package.json`; use a Node version manager or the official distribution.
-- PostgreSQL 18.6 for future persistence work. Docker with Compose v2 is one
-  supported local development recipe. The current web/API scaffold runs
-  independently of the database.
+Requirements: Node.js 24.21.0, npm 11.19.0, and PostgreSQL 18.6. Docker with
+Compose v2 supplies the database recipe. An existing PostgreSQL installation
+with an ordinary database-owning application role also works.
 
-## Start locally
-
-From the repository root:
-
-```sh
-npm ci
-npm run dev
-```
-
-Open <http://127.0.0.1:5173>. The setup page checks the real API through Vite's
-proxy. The API also responds at <http://127.0.0.1:3001/api/health> with
-`{"status":"ok"}`. This endpoint reports process liveness only.
-
-Both services bind to localhost by default. Stop them with Ctrl+C. To run
-either service separately, use `npm run dev:web` or `npm run dev:server`.
-Ports are fixed at 5173 and 3001; the web proxy expects the API at port 3001.
-
-## Local database
-
-Create a local `.env` from `.env.example`. Choose a development database
-password and update both `POSTGRES_PASSWORD` and the password in `DATABASE_URL`.
-Use a URL-safe password or percent-encode its characters in the URL.
-
-On PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-On Linux/macOS:
-
-```sh
-cp .env.example .env
-```
-
-After editing `.env`:
+Install with `npm ci`. Copy `.env.example` to `.env`, choose separate
+application and administrator passwords, and put the application password in
+`DATABASE_URL`. Percent-encode URL special characters in the password.
 
 ```sh
 npm run db:up
-npm run db:check
-npm run db:down
+npm run db:migrate
+npm run dev
 ```
 
-The database is exposed only at `127.0.0.1:5433` and data remains in the named
-volume when stopped. Changing `.env` does not change the credentials of an
-already initialized database. Do not remove the volume to fix a password
-unless its data is deliberately disposable.
+Open [Chess Room locally](http://127.0.0.1:5173). Create a room and open its
+invitation in another browser or an incognito window for the second player.
+Development binds to localhost. A link containing 127.0.0.1 works only on the
+same computer; internet play needs an HTTPS host and WebSocket routing.
+See [operations](docs/operations.md) for configuration.
 
-The Compose role is for local development. Production persistence will use
-separate migration and application roles with narrower privileges. The current
-API does not consume `DATABASE_URL` or create tables.
+Keep the guest cookie to return to your seat. Losing it loses access; a guest
+name cannot recover it. Sessions last 30 days. Waiting rooms expire after
+24 hours; invitations last up to 24 hours, bounded by the host session.
+Finished games are retained for 30 days. Timed games
+continue during disconnection and server downtime. Read the exact
+[rules and adjudication policy](docs/rules.md).
 
-## Checks and build
+Stop development with Ctrl+C. `npm run db:down` preserves the database volume.
+Changing environment passwords does not update an initialized database.
+Do not delete its volume to resolve a credential mismatch.
 
-| Task | Command |
+## Verify
+
+| Command | Purpose |
 | --- | --- |
-| Format and apply safe lint fixes | `npm run format` |
-| Check formatting and lint | `npm run lint` |
-| Strict type checking | `npm run typecheck` |
-| Run server boundary tests | `npm test` |
-| Watch tests | `npm run test:watch` |
-| Build client and server | `npm run build` |
-| Run required checks | `npm run verify` |
+| `npm run format` | Formatting and safe lint fixes |
+| `npm run verify` | Lint, strict types, unit tests and production builds |
+| `npm run test:integration` | Real PostgreSQL, concurrency, lifecycle, HTTP and sockets |
+| `npx playwright install chromium` | Download the browser for end-to-end tests |
+| `npm run test:e2e` | Two-player browser flows, mobile and keyboard checks |
+| `npm run verify:full` | All verification; requires PostgreSQL and a browser |
+| `npm run benchmark` | Bounded local synthetic load; see performance instructions |
 
-CI runs the same verification on Windows and Linux and checks the PostgreSQL
-Compose recipe on Linux. It contains no deployment or reporting steps.
-Dependency versions are locked; install lifecycle scripts and automatic audit
-requests are disabled in `.npmrc`.
+Integration tests create and remove isolated schemas. Use a local test database,
+never a production connection. Browser tests create synthetic application games.
+On Windows, set `PLAYWRIGHT_CHANNEL=msedge` to use installed Edge.
 
-The web build is in `apps/web/dist`; compiled server files are in
-`apps/server/dist`. After building, start the server with:
+CI verifies Windows and Linux builds, PostgreSQL role privileges, integration
+tests and Chromium browser flows. It has no deployment or external reporting
+steps. Dependencies are pinned and install scripts are disabled.
+
+## Built application
 
 ```sh
-npm run start --workspace @chess-room/server
+npm run build
+npm run start
 ```
 
-Serving production assets and deploying the application are future work.
+Set `SERVE_WEB=true` to serve the built browser assets from the backend, and
+`WEB_ORIGIN` to their exact browser origin. Production requires HTTPS and uses
+Secure HttpOnly cookies. `/api/health` reports process liveness;
+`/api/ready` verifies database/schema availability.
 
-## Structure
+## Design
 
-```text
-apps/web/       React browser client and Vite configuration
-apps/server/    Fastify process, configuration and liveness endpoint
-scripts/        Development process coordination
-docs/           Product architecture
-compose.yaml    Local PostgreSQL recipe
-```
+| Path | Responsibility |
+| --- | --- |
+| apps/web | React interface and realtime recovery |
+| apps/server | HTTP/socket boundaries, match services and PostgreSQL |
+| packages/contracts | Validated public protocol |
+| packages/game-core | Deterministic versioned rules adapters |
+| infra/database | Ordinary development database role initialization |
 
-The intended design keeps authoritative match decisions on the server and
-separates rules from transport and storage. Each future match will retain a
-ruleset ID/version, allowing new modes to coexist with existing matches.
-See [architecture](docs/architecture.md) for the current boundaries and direction.
+Transactions serialize competing actions; receipts make accepted retries
+idempotent. Curated rules adapters remain independent of sessions, transport
+and storage. See [architecture](docs/architecture.md),
+[operations](docs/operations.md), and [measured performance](docs/performance.md).
 
-No production capacity has been measured. No project license has been selected.
+Current scope excludes accounts, matchmaking, ratings, spectators, chat and
+executable custom scripts. The application is not deployed. No project license
+has been selected. See [dependency notices](THIRD_PARTY_NOTICES.md).

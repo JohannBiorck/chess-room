@@ -25,4 +25,5 @@ Thumbs.db
 
 # Local scratch.
 work/
-
+test-results/
+playwright-report/

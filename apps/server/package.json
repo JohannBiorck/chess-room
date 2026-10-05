@@ -7,9 +7,16 @@
     "dev": "node --env-file-if-exists=../../.env --import tsx --watch src/main.ts",
     "start": "node --env-file-if-exists=../../.env dist/main.js",
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migrate": "node --env-file-if-exists=../../.env --import tsx scripts/migrate.ts"
   },
   "dependencies": {
-    "fastify": "5.12.5"
+    "@chess-room/contracts": "0.1.0",
+    "@chess-room/game-core": "0.1.0",
+    "@fastify/cookie": "11.1.2",
+    "@fastify/static": "10.1.5",
+    "fastify": "5.12.5",
+    "pg": "8.23.1",
+    "socket.io": "4.8.4"
   }
 }

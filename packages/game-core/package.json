@@ -1,0 +1,21 @@
+{
+  "name": "@chess-room/game-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@chess-room/contracts": "0.1.0",
+    "chess.js": "1.4.0",
+    "zod": "4.6.5"
+  }
+}

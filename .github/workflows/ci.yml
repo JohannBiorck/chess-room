@@ -27,16 +27,39 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Verify workspace
         run: npm run verify
-      - name: Validate database configuration
-        if: runner.os == 'Linux'
-        env:
-          POSTGRES_PASSWORD: ci-local-database-only
+  database-and-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      POSTGRES_PASSWORD: ci-local-application-only
+      POSTGRES_ADMIN_PASSWORD: ci-local-administrator-only
+      DATABASE_URL: postgresql://chess_room:ci-local-application-only@127.0.0.1:5433/chess_room
+      HOST: 127.0.0.1
+      PORT: 3001
+      WEB_ORIGIN: http://127.0.0.1:5173
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Start local database
         run: |
           docker compose config --quiet
           docker compose up -d --wait postgres
           docker compose exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" postgres psql -h 127.0.0.1 -U chess_room -d chess_room -c "SELECT version();"
+      - name: Apply migrations
+        run: npm run db:migrate
+      - name: Verify PostgreSQL persistence and transport
+        run: npm run test:integration
+      - name: Install Chromium
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Verify games in separate browser sessions
+        run: npm run test:e2e
       - name: Stop local database
-        if: always() && runner.os == 'Linux'
-        env:
-          POSTGRES_PASSWORD: ci-local-database-only
+        if: always()
         run: docker compose down

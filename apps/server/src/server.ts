@@ -1,9 +1,14 @@
 import Fastify, { type FastifyRequest, LogController } from "fastify";
 
 export function buildServer(
-  options: { logger?: boolean; logStream?: { write(message: string): void } } = {},
+  options: {
+    logger?: boolean;
+    logStream?: { write(message: string): void };
+    trustProxy?: string[];
+  } = {},
 ) {
   const server = Fastify({
+    trustProxy: options.trustProxy ?? false,
     logController: new LogController({ disableRequestLogging: true }),
     logger:
       options.logger === false

@@ -1,0 +1,94 @@
+# Supported rules
+
+Each game records its ruleset and rules version. The server validates moves;
+the browser's board and move hints are a public projection of that state.
+Version 1 supports standard chess and the curated Three-check mode. Both use
+the standard starting position and legal movement rules, including castling,
+en passant and promotion to a queen, rook, bishop or knight.
+
+## Standard chess, version 1
+
+Checkmate wins immediately. Stalemate draws immediately. A player whose turn
+it is can claim a draw when the **current** position has occurred three times,
+or when 100 half-moves have passed without a pawn move or capture. A half-move
+is one player's move. Claim eligibility is shown in the game controls.
+
+These claims apply to the position already on the board. Claiming based on a
+proposed next move is not supported. Players can continue past an available
+claim. Five occurrences of the same position or 150 half-moves without a pawn
+move or capture draw automatically. A checkmating move takes precedence over
+the 150-half-move draw.
+
+Repetition compares piece placement, side to move, castling rights and legally
+usable en-passant rights. Move counters do not affect repetition. The saved
+initial position and accepted move history are replayed together, so restarting
+the server retains repetition and half-move history.
+
+Automatic dead-material draws cover:
+
+- King versus king.
+- King and a single bishop or knight versus king.
+- Positions with only kings and bishops where every bishop occupies the same
+  square color.
+
+Other dead positions, including blocked positions, are not solved generally.
+Players can agree a draw. The application is a casual online implementation;
+it does not provide complete tournament adjudication under every FIDE rule.
+See the [FIDE Laws of Chess](https://handbook.fide.com/chapter/E012023) for the
+tournament rules that inform the supported claims and automatic draws.
+
+## Three-check, version 1
+
+Three-check uses the same legal movement rules. A player wins by delivering
+check on three accepted moves, or by checkmating the opponent. A double check
+counts as one checking move. Each player's check counter is visible and is
+reconstructed from the accepted history after restart.
+
+Stalemate, agreed draws, repetition and half-move draws work as described
+above. Repetition also includes both check counters: returning to a previous
+board after delivering another check does not repeat the same variant state.
+Only bare kings automatically draw for dead material. A bishop or knight can
+still deliver three checks, so the standard single-minor-piece draw does not
+apply in this mode.
+
+## Clocks and lifecycle
+
+Games may be untimed or use 5 minutes with no increment, 10 minutes with a
+5-second increment, or 15 minutes with a 10-second increment. The server
+decides elapsed time and deadlines; the browser interpolates the display.
+Clocks continue during disconnection and server downtime. A move received at
+or after its server deadline loses on time. Increment is awarded once for an
+accepted move, and retrying the same command does not award it again.
+
+For a time loss in standard chess, a bare king cannot win. A lone bishop or
+knight cannot win against a bare king. The supported dead-material cases also
+draw. Other material is treated as capable of a possible mate, including two
+knights and cases where the opponent's pieces could help block its own king.
+This is a conservative material test rather than a general position solver.
+In Three-check, any piece other than a king is treated as capable of winning
+on time because it may deliver three checks.
+
+Either player may resign. A draw offer requires the other player's acceptance;
+a player cannot accept their own offer. Finished games reject further moves.
+A mutually accepted rematch creates a distinct game, preserves the rules and
+time control, and exchanges the players' colors.
+
+Guest sessions expire after 30 days. If both players' sessions expire while a
+game is still active, the background worker finishes it as an abandoned draw
+with reason `session-expired`. A game with a player whose session remains
+valid is preserved. Finished games remain subject to the 30-day retention
+policy described in [operations](operations.md).
+
+Every game is limited to 1,200 accepted half-moves. A game that reaches this
+resource limit draws automatically unless its last move already wins or
+triggers an earlier automatic draw. This bound limits stored history and
+replay work; it is an application policy rather than a tournament rule.
+
+## Adding modes
+
+Rules run as trusted, versioned application code behind the game-core boundary.
+Transport, identity, storage and clocks do not decide how chess pieces move.
+New modes must specify their legal actions, outcome and repetition identity
+and provide replay and regression tests. A different board or piece movement
+may require a separate movement engine. User-uploaded scripts and arbitrary
+rule execution are not supported.

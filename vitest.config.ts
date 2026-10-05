@@ -3,7 +3,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["apps/server/src/**/*.test.ts"],
+    include: ["apps/server/src/**/*.test.ts", "packages/*/src/**/*.test.ts"],
+    exclude: ["**/*.integration.test.ts"],
     restoreMocks: true,
   },
 });
