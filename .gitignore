@@ -1,0 +1,28 @@
+# Local credentials and environment; examples contain placeholders only.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Common generated files; specialize after choosing the stack.
+node_modules/
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Local scratch.
+work/
+
