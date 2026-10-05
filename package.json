@@ -1,0 +1,53 @@
+{
+  "name": "chess-room",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=24.21.0 <25",
+    "npm": ">=11.19.0 <12"
+  },
+  "packageManager": "npm@11.19.0",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "npm run dev --workspace @chess-room/web",
+    "dev:server": "npm run dev --workspace @chess-room/server",
+    "format": "biome check --write .",
+    "lint": "biome check .",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "npm run build --workspaces",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run build",
+    "db:up": "docker compose up -d --wait postgres",
+    "db:down": "docker compose down",
+    "db:check": "docker compose exec -T postgres psql -U chess_room -d chess_room -c \"SELECT version();\""
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "24.19.1",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
+  },
+  "files": [
+    "apps/*/src/**",
+    "apps/*/package.json",
+    "apps/*/tsconfig*.json",
+    "apps/web/index.html",
+    "apps/web/vite.config.ts",
+    "scripts/**",
+    "docs/architecture.md",
+    "compose.yaml",
+    "biome.json",
+    "tsconfig.base.json",
+    "vitest.config.ts",
+    ".node-version",
+    ".nvmrc",
+    ".npmrc",
+    ".env.example"
+  ]
+}
