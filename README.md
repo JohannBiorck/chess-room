@@ -8,6 +8,10 @@ reconnecting restores the board, history, result and clock. Supported controls
 are untimed, 5+0, 10+5 and 15+10. Players can resign, offer or claim a draw,
 rematch with colors swapped, and download PGN.
 
+[Play Chess Room online](https://chess-room-c09w.onrender.com). The free service
+can take approximately a minute to wake after inactivity. Read
+[hosting limits](docs/hosting.md) before starting a timed game.
+
 ## Run locally
 
 Requirements: Node.js 24.21.0, npm 11.19.0, and PostgreSQL 18.6. Docker with
@@ -30,7 +34,7 @@ invitation in another browser or an incognito window for the second player.
 Development binds to localhost. A link containing 127.0.0.1 works only on the
 same computer; internet play needs an HTTPS host and WebSocket routing.
 See [operations](docs/operations.md) for configuration and
-[free hosting](docs/hosting.md) for the prepared Render/Neon deployment.
+[free hosting](docs/hosting.md) for the Render/Neon deployment.
 
 Keep the guest cookie to return to your seat. Losing it loses access; a guest
 name cannot recover it. Sessions last 30 days. Waiting rooms expire after
@@ -101,6 +105,5 @@ and storage. See [architecture](docs/architecture.md),
 [operations](docs/operations.md), and [measured performance](docs/performance.md).
 
 Current scope excludes accounts, matchmaking, ratings, spectators, chat and
-executable custom scripts. Hosting preparation is complete; deployment is
-pending. No project license has been selected. See
+executable custom scripts. No project license has been selected. See
 [dependency notices](THIRD_PARTY_NOTICES.md).

@@ -83,8 +83,9 @@ See [operations](operations.md) and [performance](performance.md).
 
 ## Hosted startup
 
-The prepared Free deployment serves browser assets, API and sockets from one
-Render HTTPS origin, with durable PostgreSQL in Neon. Deployment is pending.
+The [Free deployment](https://chess-room-c09w.onrender.com) serves browser
+assets, API and sockets from one Render HTTPS origin, with durable PostgreSQL
+18 in Neon. The database uses fixed 0.25 CU compute with idle suspension.
 The normal server requires an already migrated schema. `start:hosted` instead
 uses a separate owner connection to apply checksum-verified migrations and
 grant the runtime role its required table/sequence permissions. It rejects

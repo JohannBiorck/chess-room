@@ -1,10 +1,17 @@
 # Free hosting configuration
 
-The prepared deployment uses one Render Free web service and one Neon Free
-PostgreSQL project, both in Frankfurt. The web service serves the built browser,
+The [live application](https://chess-room-c09w.onrender.com) uses one Render Free
+web service and one Neon Free PostgreSQL project, both in Frankfurt.
+The web service serves the built browser,
 API and WebSocket transport from one HTTPS origin. `render.yaml` declares the
 service; it contains no database credentials or database resource that expires
 after a trial period.
+
+The deployed database uses PostgreSQL 18, fixed 0.25 CU compute and five-minute
+idle suspension. Runtime access uses a separate restricted SQL-created role;
+startup migrations use the owner connection. Both connections verify TLS
+certificates. Render and Neon are on Free plans without a payment method.
+The HTTPS readiness endpoint was verified on 2026-10-07.
 
 ## Keep the deployment at zero cost
 
@@ -99,8 +106,9 @@ terminates TLS before forwarding to the process. See
 [Blueprint fields](https://render.com/docs/blueprint-spec).
 
 Automatic deploys are disabled. A Git push updates source without deploying
-it; review the change and trigger a manual deployment when ready. Review
-runtime logs for readiness, worker failures, resource limits and migration
+it; review the change and trigger a manual deployment when ready. Service
+notifications are set to None. Check the dashboard and runtime logs for
+readiness, worker failures, resource limits and migration
 errors. Keep proxy trust restricted to verified infrastructure rather than
 accepting arbitrary forwarded client addresses.
 

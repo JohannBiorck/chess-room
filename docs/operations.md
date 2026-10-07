@@ -1,8 +1,9 @@
 # Operations
 
-The application runs locally while hosted deployment is pending. The prepared
-[free hosting configuration](hosting.md) uses one Render web service and one
-Neon database. This runbook covers startup, access controls and recovery.
+The [live application](https://chess-room-c09w.onrender.com) runs on one Render
+Free web service with Neon PostgreSQL in Frankfurt. See
+[hosting](hosting.md) for the free-plan configuration and limits. This runbook
+covers startup, access controls and recovery.
 
 ## Start and verify
 
