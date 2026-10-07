@@ -61,4 +61,38 @@ describe("application configuration", () => {
       ).toThrow();
     }
   });
+  it("uses the provider's HTTPS origin when an explicit origin is absent", () => {
+    expect(
+      readApplicationConfig({
+        DATABASE_URL: databaseUrl,
+        NODE_ENV: "production",
+        RENDER_EXTERNAL_URL: "https://example-chess.onrender.com",
+        SERVE_WEB: "true",
+      }),
+    ).toMatchObject({
+      webOrigin: "https://example-chess.onrender.com",
+      secureCookies: true,
+      serveWeb: true,
+    });
+    expect(
+      readApplicationConfig({
+        DATABASE_URL: databaseUrl,
+        WEB_ORIGIN: "https://custom.example",
+        RENDER_EXTERNAL_URL: "https://example-chess.onrender.com",
+      }).webOrigin,
+    ).toBe("https://custom.example");
+  });
+  it.each([
+    "http://example-chess.onrender.com",
+    "https://example.test/path",
+    "https://user:secret@example.test",
+  ])("rejects unsafe hosted origin %s", (origin) => {
+    expect(() =>
+      readApplicationConfig({
+        DATABASE_URL: databaseUrl,
+        NODE_ENV: "production",
+        RENDER_EXTERNAL_URL: origin,
+      }),
+    ).toThrow();
+  });
 });

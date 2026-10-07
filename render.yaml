@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: chess-room
+    runtime: node
+    region: frankfurt
+    plan: free
+    branch: main
+    autoDeployTrigger: "off"
+    healthCheckPath: /api/health
+    buildCommand: npm ci --include=dev --ignore-scripts && npm run build
+    startCommand: npm run start:hosted
+    envVars:
+      - key: NODE_VERSION
+        value: "24.21.0"
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: "0.0.0.0"
+      - key: SERVE_WEB
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: MIGRATION_DATABASE_URL
+        sync: false

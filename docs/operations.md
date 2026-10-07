@@ -1,8 +1,8 @@
 # Operations
 
-The application currently runs locally. No hosted deployment, domain, TLS
-certificate, monitoring service or external backup destination is configured.
-This runbook describes the controls needed when preparing a deployment.
+The application runs locally while hosted deployment is pending. The prepared
+[free hosting configuration](hosting.md) uses one Render web service and one
+Neon database. This runbook covers startup, access controls and recovery.
 
 ## Start and verify
 
@@ -18,10 +18,24 @@ npm run dev
 
 `GET /api/health` reports process liveness. `GET /api/ready` checks database
 connectivity and the matches table; route traffic only to ready instances.
-Startup fails when the database is unavailable or migrations are absent.
+Standard startup fails when the database is unavailable or migrations are absent.
 Migrations are explicit, ordered, transactional and checksum checked. Do not
 edit an applied migration. `MIGRATION_DATABASE_URL` can supply a separate
 migration credential; otherwise the migration command uses `DATABASE_URL`.
+
+`npm run start:hosted` requires both connection URLs. It applies migrations with
+the database/schema owner, validates a separate restricted runtime role, and
+grants only the application tables and outbox sequence permissions. Privileged
+roles, role memberships, schema/database/object ownership, DDL rights and access
+to migration records are rejected for the runtime role. The owner connection
+closes before normal request handling; its URL is removed from the running
+process environment. Use the restricted `DATABASE_URL` for application traffic.
+
+Local integration tests require `ADMIN_DATABASE_URL` in addition to the local
+owner/application URL. This administrator creates disposable role fixtures;
+it is not a runtime or hosted-service credential. Use the placeholders in
+`.env.example` with a disposable local database. CI supplies separate local
+application and administrator credentials for the same checks.
 
 The Compose recipe gives the application a non-superuser database login.
 For production, use separate migration and application roles and grant only
@@ -35,6 +49,9 @@ Set `NODE_ENV=production` and `WEB_ORIGIN` to the exact HTTPS browser origin,
 for example `https://chess.example`. A path, wildcard or HTTP production origin
 is rejected. Serve the built browser and API from the same origin; set
 `SERVE_WEB=true` when using the backend's static-file serving.
+On Render, `RENDER_EXTERNAL_URL` supplies the origin when `WEB_ORIGIN` is absent.
+The service binds to `0.0.0.0` using Render's supplied `PORT`; the Blueprint
+uses `/api/health` for platform checks so probes do not wake an idle database.
 
 The HTTPS configuration uses a Secure, HttpOnly, SameSite cookie with the
 `__Host-` prefix and no Domain attribute. Guest identity is stored in that
@@ -77,10 +94,19 @@ time is read after acquiring the match lock. Keep the database host's clock
 synchronized. The service does not pause clocks automatically during an outage.
 The exact draw and timeout policies are documented in [rules](rules.md).
 
+The background scheduler polls revisions at 250 ms only while game subscribers
+are connected. Without subscribers it waits for the nearest durable clock
+deadline or cleanup deadline, with an hourly upper bound. Mutations and
+subscription changes wake it immediately. Idle database connections expire
+through the pool's idle timeout, allowing a serverless database to suspend
+between scheduled work. Closing unused game tabs avoids retaining active
+subscriptions; continuous activity still consumes the provider's free quota.
+
 Structured logs use request identifiers and safe error codes. Runtime summaries
 include request duration, event-loop delay, fanout delay, active sockets and
-database-pool state. They remain local. Monitor readiness failures, worker
-failures, pool wait, lock timeouts, disk space and retained row counts before
+database-pool state. They are written to server logs; a hosting platform may
+retain those logs. No external reporting integration is configured. Monitor
+readiness failures, worker failures, pool wait, lock timeouts, disk space and retained row counts before
 operating the service for others. [Performance](performance.md) records the
 measured local baseline and its limits.
 

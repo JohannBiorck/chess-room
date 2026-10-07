@@ -1,10 +1,15 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
-import { type GameCommand, gameViewSchema, type PublicGame } from "@chess-room/contracts";
+import {
+  type GameCommand,
+  gameViewSchema,
+  type PublicGame,
+  type TimeControl,
+} from "@chess-room/contracts";
 import { Pool } from "pg";
 import { io as connectSocket, type Socket } from "socket.io-client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Database } from "../storage/database.js";
 import { migrate } from "../storage/migrations.js";
@@ -77,12 +82,12 @@ describe("HTTP and real Socket.IO game transport", () => {
     return cookie;
   }
 
-  async function create(cookie: string) {
-    const response = await application.server.inject({
+  async function create(cookie: string, app = application, timeControl: TimeControl = "untimed") {
+    const response = await app.server.inject({
       method: "POST",
       url: "/api/games",
       headers: { origin, cookie },
-      payload: { rulesetId: "standard", color: "white", timeControl: "untimed" },
+      payload: { rulesetId: "standard", color: "white", timeControl },
     });
     expect(response.statusCode).toBe(201);
     return response.json<{ game: PublicGame; invitation: { token: string } }>();
@@ -100,6 +105,13 @@ describe("HTTP and real Socket.IO game transport", () => {
     });
     expect(joined.statusCode).toBe(200);
     return { whiteCookie, blackCookie, view: gameViewSchema.parse(joined.json()) };
+  }
+
+  async function backgroundApplication(): Promise<Application> {
+    const app = await buildApplication({ database, config: config(), logger: false });
+    applications.push(app);
+    await app.scheduler?.settled();
+    return app;
   }
 
   async function postCommand(
@@ -156,6 +168,104 @@ describe("HTTP and real Socket.IO game transport", () => {
       socket.on("game:updated", receive);
     });
   }
+
+  it("leaves PostgreSQL unused while idle and answers liveness probes without database reads", async () => {
+    const worker = await backgroundApplication();
+    const queries = vi.spyOn(database.pool, "query");
+    const transactions = vi.spyOn(database, "transaction");
+    for (let probe = 0; probe < 3; probe += 1) {
+      expect((await worker.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(
+        200,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(queries).not.toHaveBeenCalled();
+    expect(transactions).not.toHaveBeenCalled();
+  });
+
+  it("processes a persisted clock deadline without sockets after worker startup", async () => {
+    const { view } = await startedGame();
+    await database.pool.query(
+      `UPDATE matches SET lifecycle=lifecycle || jsonb_build_object(
+      'timeControl','5+0','remaining',jsonb_build_object('white',300,'black',300000),
+      'turnStartedAt',floor(extract(epoch FROM clock_timestamp())*1000)::bigint,
+      'deadlineAt',floor(extract(epoch FROM clock_timestamp())*1000)::bigint+300) WHERE id=$1`,
+      [view.game.id],
+    );
+    const worker = await backgroundApplication();
+    expect(worker.io.engine.clientsCount).toBe(0);
+    await expect
+      .poll(
+        async () => {
+          const result = await database.pool.query<{ status: string }>(
+            "SELECT status FROM matches WHERE id=$1",
+            [view.game.id],
+          );
+          return result.rows[0]?.status;
+        },
+        { timeout: 5_000, interval: 25 },
+      )
+      .toBe("finished");
+    const result = await database.pool.query<{
+      lifecycle: { outcome: { winner: string; reason: string } };
+    }>("SELECT lifecycle FROM matches WHERE id=$1", [view.game.id]);
+    expect(result.rows[0]?.lifecycle.outcome).toEqual({ winner: "black", reason: "timeout" });
+  });
+
+  it("reschedules an idle worker when an HTTP join starts a timed game", async () => {
+    const worker = await backgroundApplication();
+    const whiteCookie = await guest("White", worker);
+    const blackCookie = await guest("Black", worker);
+    const created = await create(whiteCookie, worker, "5+0");
+    await worker.scheduler?.settled();
+    await database.pool.query(
+      "UPDATE matches SET lifecycle=jsonb_set(lifecycle,'{remaining,white}','300'::jsonb) WHERE id=$1",
+      [created.game.id],
+    );
+    const joined = await worker.server.inject({
+      method: "POST",
+      url: "/api/invitations/join",
+      headers: { origin, cookie: blackCookie },
+      payload: { token: created.invitation.token },
+    });
+    expect(joined.statusCode).toBe(200);
+    await worker.scheduler?.settled();
+    expect(worker.io.engine.clientsCount).toBe(0);
+    await expect
+      .poll(
+        async () => {
+          const result = await database.pool.query<{ status: string }>(
+            "SELECT status FROM matches WHERE id=$1",
+            [created.game.id],
+          );
+          return result.rows[0]?.status;
+        },
+        { timeout: 5_000, interval: 25 },
+      )
+      .toBe("finished");
+  });
+
+  it("polls real subscribed games and stops database polling after the last socket disconnects", async () => {
+    const { whiteCookie, view } = await startedGame();
+    const worker = await backgroundApplication();
+    const address = await worker.server.listen({ port: 0, host: "127.0.0.1" });
+    const socket = await socketAt(address, whiteCookie);
+    gameViewSchema.parse(await subscribe(socket, view.game.id));
+    await worker.scheduler?.settled();
+    const queries = vi.spyOn(database.pool, "query");
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(queries.mock.calls.length).toBeGreaterThanOrEqual(2);
+    socket.disconnect();
+    await expect
+      .poll(() => worker.io.sockets.sockets.size, { timeout: 2_000, interval: 10 })
+      .toBe(0);
+    await worker.scheduler?.settled();
+    queries.mockClear();
+    const transactions = vi.spyOn(database, "transaction");
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(queries).not.toHaveBeenCalled();
+    expect(transactions).not.toHaveBeenCalled();
+  });
 
   it("requires an allowed origin for mutations and does not create sessions for rejected origins", async () => {
     for (const headers of [

@@ -32,7 +32,8 @@
     "db:migrate": "npm run migrate --workspace @chess-room/server",
     "start": "npm run start --workspace @chess-room/server",
     "verify:full": "npm run verify && npm run test:integration && npm run test:e2e",
-    "benchmark": "node scripts/benchmark.mjs"
+    "benchmark": "node scripts/benchmark.mjs",
+    "start:hosted": "npm run start:hosted --workspace @chess-room/server"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
@@ -71,6 +72,8 @@
     "docs/rules.md",
     "docs/operations.md",
     "docs/performance.md",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "render.yaml",
+    "docs/hosting.md"
   ]
 }

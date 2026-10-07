@@ -43,6 +43,12 @@ subscribed games' durable revisions every 250 milliseconds and broadcasts
 newer committed projections. Reconnection resubscribes and replaces the
 snapshot, so missed individual broadcasts cannot lose an accepted move.
 
+Polling runs while a process has game subscribers. Otherwise an idle-aware
+scheduler waits for the nearest durable game deadline or hourly cleanup,
+and wakes on mutations or subscription changes. Each process performs one
+worker cycle at a time. This preserves timeout processing without querying
+an unused serverless database four times per second.
+
 The outbox is drained in bounded batches after commit. Revision polling is the
 shared fanout and recovery source. Outbox completion does not prove a browser
 received a message. PostgreSQL holds shared request counters and match locks.
@@ -72,5 +78,17 @@ bound input and React renders names as text. Custom modes are trusted code.
 
 Payload, request, connection and room limits bound resources. Proxy forwarding
 is trusted only for configured IP addresses or CIDRs. Logs exclude payloads,
-tokens, cookies, URLs and display names. Aggregate diagnostics stay local.
+tokens, cookies, URLs and display names. Aggregate diagnostics go to server logs.
 See [operations](operations.md) and [performance](performance.md).
+
+## Hosted startup
+
+The prepared Free deployment serves browser assets, API and sockets from one
+Render HTTPS origin, with durable PostgreSQL in Neon. Deployment is pending.
+The normal server requires an already migrated schema. `start:hosted` instead
+uses a separate owner connection to apply checksum-verified migrations and
+grant the runtime role its required table/sequence permissions. It rejects
+elevated or owning runtime roles, closes the owner pool, removes the migration
+URL from its process environment, and starts using the restricted application
+connection. The Render Blueprint disables automatic deployment and has no
+stored secrets. See [hosting](hosting.md).

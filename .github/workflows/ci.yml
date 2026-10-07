@@ -34,6 +34,7 @@ jobs:
       POSTGRES_PASSWORD: ci-local-application-only
       POSTGRES_ADMIN_PASSWORD: ci-local-administrator-only
       DATABASE_URL: postgresql://chess_room:ci-local-application-only@127.0.0.1:5433/chess_room
+      ADMIN_DATABASE_URL: postgresql://chess_room_admin:ci-local-administrator-only@127.0.0.1:5433/chess_room
       HOST: 127.0.0.1
       PORT: 3001
       WEB_ORIGIN: http://127.0.0.1:5173

@@ -21,7 +21,9 @@ export function readApplicationConfig(environment: NodeJS.ProcessEnv): Applicati
     throw new Error("DATABASE_URL must be a PostgreSQL URL.");
   let origin: URL;
   try {
-    origin = new URL(environment.WEB_ORIGIN ?? "http://127.0.0.1:5173");
+    origin = new URL(
+      environment.WEB_ORIGIN ?? environment.RENDER_EXTERNAL_URL ?? "http://127.0.0.1:5173",
+    );
   } catch {
     throw new Error("WEB_ORIGIN must be an HTTP origin.");
   }

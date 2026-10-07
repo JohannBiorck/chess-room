@@ -13,6 +13,7 @@ import { z } from "zod";
 import { buildServer } from "../server.js";
 import type { Database } from "../storage/database.js";
 import type { SessionRecord } from "../storage/records.js";
+import { BackgroundScheduler } from "./background.js";
 import type { ApplicationConfig } from "./config.js";
 import { ApplicationError, errorBody } from "./errors.js";
 import { GameService, SESSION_LIFETIME } from "./games.js";
@@ -36,6 +37,7 @@ export async function buildApplication(options: {
   });
   const service = options.service ?? new GameService(database);
   const metrics = new RuntimeMetrics();
+  let scheduler: BackgroundScheduler | undefined;
   const requestStarts = new WeakMap<FastifyRequest, number>();
   const cookieName = config.secureCookies ? "__Host-chess_session" : "chess_session";
   await server.register(cookie);
@@ -60,11 +62,19 @@ export async function buildApplication(options: {
       await rateLimit(database, `http:${request.ip}`, 600);
     }
   });
-  server.addHook("onResponse", async (request) => {
+  server.addHook("onResponse", async (request, reply) => {
     metrics.requests += 1;
     metrics.requestDuration.add(
       performance.now() - (requestStarts.get(request) ?? performance.now()),
     );
+    const route = request.routeOptions.url;
+    if (
+      request.method === "POST" &&
+      ["/api/games", "/api/invitations/join", "/api/games/:id/commands"].includes(route ?? "") &&
+      (reply.statusCode < 400 || reply.statusCode === 409)
+    ) {
+      scheduler?.wake();
+    }
   });
 
   server.setErrorHandler((error, request, reply) => {
@@ -218,6 +228,7 @@ export async function buildApplication(options: {
         await socket.join(`game:${id}`);
         revisions.set(id, Math.min(revisions.get(id) ?? view.game.revision, view.game.revision));
         acknowledge(view);
+        scheduler?.wake();
       } catch (error) {
         acknowledge(
           errorBody(
@@ -230,15 +241,15 @@ export async function buildApplication(options: {
     });
     socket.on("disconnect", () => {
       clearInterval(expiry);
+      scheduler?.wake();
     });
   });
 
-  let working = false;
+  let working: Promise<void> | null = null;
   let cleanupAt = 0;
-  const tick = async () => {
-    if (working) return;
-    working = true;
-    try {
+  const performTick = (): Promise<void> => {
+    if (working) return working;
+    working = (async () => {
       await service.expireDue();
       if (Date.now() >= cleanupAt) {
         await service.cleanup();
@@ -268,15 +279,46 @@ export async function buildApplication(options: {
           }
         }
       }
+    })().finally(() => {
+      working = null;
+    });
+    return working;
+  };
+  const reportWorkerFailure = () => {
+    metrics.workerFailures += 1;
+    server.log.error({ code: "background-failed" }, "Background processing failed");
+  };
+  const tick = async () => {
+    try {
+      await performTick();
     } catch {
-      metrics.workerFailures += 1;
-      server.log.error({ code: "background-failed" }, "Background processing failed");
-    } finally {
-      working = false;
+      reportWorkerFailure();
     }
   };
-  const interval = options.workers === false ? null : setInterval(() => void tick(), 250);
-  interval?.unref();
+  if (options.workers !== false) {
+    scheduler = new BackgroundScheduler({
+      hasSubscribers: () =>
+        [...revisions.keys()].some((id) => io.sockets.adapter.rooms.has(`game:${id}`)),
+      work: performTick,
+      nextWakeDelay: async () => {
+        const result = await database.pool.query<{
+          deadline_at: string | null;
+          database_now: string;
+        }>(
+          `SELECT min((lifecycle->>'deadlineAt')::bigint)::text AS deadline_at,
+           floor(extract(epoch FROM clock_timestamp())*1000)::bigint::text AS database_now
+           FROM matches WHERE status='active'`,
+        );
+        const row = result.rows[0];
+        if (!row) throw new Error("Database did not return a background deadline.");
+        const deadlineDelay =
+          row.deadline_at === null ? Infinity : Number(row.deadline_at) - Number(row.database_now);
+        return Math.min(deadlineDelay, Math.max(0, cleanupAt - Date.now()));
+      },
+      onError: reportWorkerFailure,
+    });
+    scheduler.wake();
+  }
   const diagnostics =
     options.workers === false
       ? null
@@ -296,11 +338,11 @@ export async function buildApplication(options: {
         }, 60_000);
   diagnostics?.unref();
   server.addHook("onClose", async () => {
-    if (interval) clearInterval(interval);
+    await scheduler?.close();
     if (diagnostics) clearInterval(diagnostics);
-    metrics.close();
     await new Promise<void>((resolve) => io.close(() => resolve()));
-    while (working) await new Promise((resolve) => setTimeout(resolve, 10));
+    if (working) await working.catch(reportWorkerFailure);
+    metrics.close();
   });
-  return { server, service, io, tick, metrics };
+  return { server, service, io, tick, metrics, scheduler };
 }

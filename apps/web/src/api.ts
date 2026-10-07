@@ -9,6 +9,10 @@ export class ApiError extends Error {
   }
 }
 
+const STARTUP_REQUEST_TIMEOUT_MS = 75_000;
+const GAME_REQUEST_TIMEOUT_MS = 12_000;
+const startupPaths = new Set(["/api/session", "/api/games", "/api/invitations/join"]);
+
 export async function request<T>(path: string, body?: unknown): Promise<T> {
   let response: Response;
   try {
@@ -18,7 +22,10 @@ export async function request<T>(path: string, body?: unknown): Promise<T> {
       cache: "no-store",
       headers: body === undefined ? {} : { "Content-Type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(12_000),
+      // An idle service can take longer to start; active game requests retain a short deadline.
+      signal: AbortSignal.timeout(
+        startupPaths.has(path) ? STARTUP_REQUEST_TIMEOUT_MS : GAME_REQUEST_TIMEOUT_MS,
+      ),
     });
   } catch {
     throw new ApiError(

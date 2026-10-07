@@ -8,7 +8,8 @@
     "start": "node --env-file-if-exists=../../.env dist/main.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "migrate": "node --env-file-if-exists=../../.env --import tsx scripts/migrate.ts"
+    "migrate": "node --env-file-if-exists=../../.env --import tsx scripts/migrate.ts",
+    "start:hosted": "node --env-file-if-exists=../../.env dist/hosted-main.js"
   },
   "dependencies": {
     "@chess-room/contracts": "0.1.0",
