@@ -1,8 +1,9 @@
 # Architecture
 
 Chess Room is a modular application with React, Fastify and PostgreSQL.
-Standard chess and Three-check share one match service. Browsers render public
-state and submit actions; the server owns moves, revisions, clocks and results.
+Standard chess, Three-check and Catchess share one match service. Browsers render
+public state and submit actions; the server owns moves, revisions, clocks,
+random cat decisions and results.
 
 ## Boundaries
 
@@ -18,7 +19,16 @@ Rules IDs and versions are immutable per match. Durable engine state retains
 the initial position and accepted moves, preserving repetition on restart.
 Compatibility fixtures protect saved games. Future modes with different boards
 or movement can introduce another engine behind the application boundary;
-the current adapters share standard movement and customize adjudication.
+the current adapters share standard movement and customize adjudication or
+post-move board effects.
+
+Catchess stores each player's signed chance and a server-generated random draw
+alongside each accepted move. The rules engine derives the cat effect from that
+draw, checks king safety and verifies the stored effect when replaying a game.
+Replay and reconnects therefore reproduce the same board without rerolling.
+Cat changes are part of a turn and happen before its final adjudication.
+Standard and Three-check retain their original public message shape. Catchess
+snapshots additionally carry the signed settings and one cat effect per move.
 
 ## Commands
 
@@ -34,6 +44,11 @@ different data fails. Rejected commands do not consume the UUID. Clients ignore
 older revisions and retry uncertain requests with the same command identifier.
 Commands use HTTP; authorized Socket.IO subscriptions distribute snapshots.
 See [Socket.IO delivery guarantees](https://socket.io/docs/v4/delivery-guarantees/).
+
+Catchess entropy is generated inside the locked move execution after the
+receipt, authorization, revision and turn checks. Its move, cat effect and
+receipt commit atomically. Clients cannot choose the draw or a target square;
+they animate the committed effect received in the public snapshot.
 
 ## Multiple instances and recovery
 
@@ -64,7 +79,8 @@ time and adds increment. A bounded worker finishes overdue games without
 clients. A move at or after its deadline loses to timeout. Clocks continue
 through disconnection and restart.
 
-Rematches create a separate match and swap colors. Waiting rooms expire after
+Rematches create a separate match and swap colors. Catchess chances follow the
+players to their new colors. Waiting rooms expire after
 24 hours; finished games are removed after 30 days by hourly bounded cleanup.
 Histories are bounded at 1,200 plies.
 

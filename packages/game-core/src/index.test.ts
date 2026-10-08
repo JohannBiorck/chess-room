@@ -12,7 +12,10 @@ import {
 } from "./index.js";
 
 function play(moves: MoveInput[], initialFen?: string, rulesetId: RulesetId = "standard") {
-  return moves.reduce(applyEngineMove, createEngineState(rulesetId, initialFen));
+  return moves.reduce(
+    (state, input) => applyEngineMove(state, input),
+    createEngineState(rulesetId, initialFen),
+  );
 }
 
 function move(from: string, to: string, promotion?: "q" | "r" | "b" | "n"): MoveInput {

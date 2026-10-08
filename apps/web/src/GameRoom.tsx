@@ -1,4 +1,5 @@
 import {
+  type CatEffect,
   type Color,
   type GameAction,
   type GameOutcome,
@@ -11,7 +12,9 @@ import { useEffect, useRef, useState } from "react";
 
 import { invitationUrl } from "./api";
 import { Board } from "./Board";
+import { Cat } from "./Cat";
 import { Clock } from "./Clock";
+import { catChanceLabel, catEffectDescription } from "./catPresentation";
 import { CopyIcon, FlipIcon, LinkIcon } from "./Icons";
 import { Modal } from "./Modal";
 import { Piece, pieceNames } from "./Piece";
@@ -36,6 +39,7 @@ const reasonLabels: Record<GameOutcome["reason"], string> = {
 
 type GameRoomProps = {
   view: GameView;
+  liveCatEffects: CatEffect[];
   invitation: Invitation | null;
   receivedAt: number;
   busy: boolean;
@@ -49,6 +53,7 @@ type GameRoomProps = {
 
 export function GameRoom({
   view,
+  liveCatEffects,
   invitation,
   receivedAt,
   busy,
@@ -107,6 +112,9 @@ export function GameRoom({
   const incomingRematch = game.rematchRequested.includes(opponent);
   const invitationExpired = invitation !== null && invitation.expiresAt <= now;
   const lastMove = game.position.moves.at(-1);
+  const effectsByPly = new Map(
+    (game.position.catEffects ?? []).map((effect) => [effect.ply, effect]),
+  );
   const status = finished
     ? game.outcome?.winner
       ? `${game.players[game.outcome.winner]?.displayName ?? game.outcome.winner} wins`
@@ -206,6 +214,9 @@ export function GameRoom({
         <section className="board-panel" aria-label="Players and board">
           {player(orientation === "white" ? "black" : "white")}
           <Board
+            gameId={game.id}
+            catEffects={liveCatEffects}
+            latestPly={game.position.moves.length}
             board={game.position.board}
             legalMoves={game.position.legalMoves}
             orientation={orientation}
@@ -272,6 +283,32 @@ export function GameRoom({
               </fieldset>
             )}
           </section>
+          {game.catchess && (
+            <fieldset className="cat-match-settings">
+              <legend>Cats at this table</legend>
+              {(["white", "black"] as const).map((color) => (
+                <div
+                  className={`cat-match-setting cat-match-setting--${game.catchess && game.catchess[color] < 0 ? "evil" : "helpful"}`}
+                  key={color}
+                >
+                  <span className="cat-match-avatar">
+                    <Cat color={color} evil={(game.catchess?.[color] ?? 0) < 0} />
+                  </span>
+                  <div>
+                    <strong>{color === "white" ? "White’s cat" : "Black’s cat"}</strong>
+                    <span>{game.players[color]?.displayName ?? "Open seat"}</span>
+                  </div>
+                  <span className="cat-chance-value">
+                    {catChanceLabel(game.catchess?.[color] ?? 0)}
+                  </span>
+                </div>
+              ))}
+              <p className="field-hint">
+                After each owner’s move: helpful adds their pawn; evil removes their pawn. No safe
+                target means no change.
+              </p>
+            </fieldset>
+          )}
           {game.phase === "waiting" && (
             <section className="invite-panel" aria-labelledby="invite-heading">
               <h3 id="invite-heading">
@@ -414,9 +451,19 @@ export function GameRoom({
                           <th scope="row">{Math.ceil(entry.ply / 2)}.</th>
                           <td className={lastMove?.ply === entry.ply ? "move--latest" : ""}>
                             {entry.san}
+                            {effectsByPly.get(entry.ply) && (
+                              <small className="cat-history-effect">
+                                {catEffectDescription(effectsByPly.get(entry.ply) as CatEffect)}
+                              </small>
+                            )}
                           </td>
                           <td className={lastMove?.ply === entry.ply + 1 ? "move--latest" : ""}>
                             {game.position.moves[entry.ply]?.san ?? "—"}
+                            {effectsByPly.get(entry.ply + 1) && (
+                              <small className="cat-history-effect">
+                                {catEffectDescription(effectsByPly.get(entry.ply + 1) as CatEffect)}
+                              </small>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -462,6 +509,14 @@ export function GameRoom({
           <details className="rules-details">
             <summary>About these rules</summary>
             <p>{rule?.description}</p>
+            {game.rulesetId === "catchess" && (
+              <p>
+                Helpful cats add an own pawn to a safe, empty square on their half of the board:
+                ranks 1–4 for White and 5–8 for Black. Evil cats remove one of their owner’s pawns.
+                The signed chances are fixed for this game; each committed action is recorded in
+                history and never rerolled by reconnecting.
+              </p>
+            )}
             <p>
               Threefold repetition and fifty-move draws require a claim on your turn. Fivefold
               repetition and seventy-five-move draws are automatic. Clocks continue during

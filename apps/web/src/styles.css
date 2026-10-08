@@ -1446,3 +1446,433 @@ fieldset legend {
     transition: none;
   }
 }
+
+.cat-illustration {
+  --cat-fur: #dcb16d;
+  --cat-patch: #fff0ce;
+  --cat-outline: #574738;
+  --cat-stripe: #a57843;
+  --cat-collar: #3f7161;
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.cat-illustration--black {
+  --cat-fur: #758a7c;
+  --cat-patch: #c3ccb6;
+  --cat-outline: #263e34;
+  --cat-stripe: #3e5b49;
+}
+.cat-illustration--evil {
+  --cat-collar: #a3543b;
+}
+.cat-shadow {
+  fill: #263a2b;
+  opacity: 0.17;
+}
+.cat-fur {
+  fill: var(--cat-fur);
+  stroke: var(--cat-outline);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+.cat-patch {
+  fill: var(--cat-patch);
+}
+.cat-tail {
+  fill: none;
+  stroke: var(--cat-fur);
+  stroke-width: 10;
+  stroke-linecap: round;
+}
+.cat-stripe {
+  fill: none;
+  stroke: var(--cat-stripe);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+.cat-ear {
+  fill: #d58f77;
+}
+.cat-eye {
+  fill: #23392f;
+}
+.cat-eye-glint {
+  fill: #fffdf0;
+}
+.cat-nose {
+  fill: #ac6454;
+}
+.cat-face-line,
+.cat-brow {
+  fill: none;
+  stroke: var(--cat-outline);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+.cat-collar {
+  fill: none;
+  stroke: var(--cat-collar);
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+.cat-bell {
+  fill: #e4bb52;
+  stroke: var(--cat-outline);
+  stroke-width: 1;
+}
+.catchess-settings {
+  background: #f5f3e7;
+  border: 1px solid #d9dccb;
+  border-radius: 9px;
+  padding: 14px 16px 16px;
+  margin-top: 2px;
+}
+.catchess-settings > legend {
+  padding: 0 6px;
+  margin-bottom: 0;
+  color: #52623e;
+}
+.cat-slider {
+  --cat-accent: #375e45;
+  padding-top: 15px;
+}
+.cat-slider--evil {
+  --cat-accent: #9b523e;
+}
+.cat-slider--off {
+  --cat-accent: #65705f;
+}
+.cat-slider + .cat-slider {
+  border-top: 1px solid #dcdecd;
+  margin-top: 13px;
+}
+.cat-slider-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.cat-slider-avatar {
+  width: 37px;
+  height: 34px;
+  flex-shrink: 0;
+}
+.cat-slider-heading label {
+  font-size: 12px;
+  font-weight: 600;
+}
+.cat-slider-heading output {
+  margin-left: auto;
+  color: var(--cat-accent);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: right;
+}
+.cat-slider input[type="range"] {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-height: 44px;
+  height: 44px;
+  background: transparent;
+  cursor: pointer;
+  accent-color: var(--cat-accent);
+}
+.cat-slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 7px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, #b97054 0%, #dce0cc 49%, #83a078 100%);
+}
+.cat-slider input[type="range"]::-moz-range-track {
+  height: 7px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, #b97054 0%, #dce0cc 49%, #83a078 100%);
+}
+.cat-slider input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 23px;
+  height: 23px;
+  border-radius: 50%;
+  background: var(--cat-accent);
+  border: 4px solid #fffdf1;
+  box-shadow: 0 0 0 1px var(--cat-accent);
+  margin-top: -8px;
+}
+.cat-slider input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--cat-accent);
+  border: 4px solid #fffdf1;
+  box-shadow: 0 0 0 1px var(--cat-accent);
+}
+.cat-slider-scale {
+  display: flex;
+  justify-content: space-between;
+  gap: 9px;
+  color: #6c745f;
+  font-size: 9px;
+  margin-top: -4px;
+  margin-bottom: 9px;
+}
+.cat-match-settings {
+  padding: 15px 24px 20px;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+  background: #faf7ed;
+}
+.cat-match-settings legend {
+  padding-top: 15px;
+  padding-bottom: 0;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  float: left;
+  width: 100%;
+}
+.cat-match-setting {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 0;
+  clear: both;
+}
+.cat-match-setting + .cat-match-setting {
+  border-top: 1px solid #e5e5d7;
+}
+.cat-match-avatar {
+  width: 38px;
+  height: 36px;
+  flex-shrink: 0;
+}
+.cat-match-setting strong {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+}
+.cat-match-setting > div > span {
+  display: block;
+  color: #6a725c;
+  margin-top: 4px;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.cat-chance-value {
+  margin-left: auto;
+  font-size: 10px;
+  color: #3e6646;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.cat-match-setting--evil .cat-chance-value {
+  color: #96513c;
+}
+.cat-history-effect {
+  display: block;
+  margin-top: 5px;
+  font-size: 9px;
+  line-height: 1.55;
+  color: #596849;
+  font-weight: 400;
+}
+.board-stage {
+  position: relative;
+  isolation: isolate;
+  --board-frame: 6px;
+}
+.square .board-piece {
+  width: 88%;
+  height: 88%;
+  z-index: 1;
+  display: block;
+  pointer-events: none;
+}
+.square .board-piece .piece {
+  width: 100%;
+  height: 100%;
+}
+.board-piece--cat-arrival {
+  visibility: hidden;
+}
+.cat-layer {
+  position: absolute;
+  inset: var(--board-frame);
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 4;
+  border-radius: 1px;
+}
+.cat-target {
+  position: absolute;
+  width: 12.5%;
+  height: 12.5%;
+  pointer-events: none;
+}
+.cat-travel {
+  position: absolute;
+  inset: 0;
+  animation: cat-travel var(--cat-visit-duration) cubic-bezier(0.35, 0.05, 0.28, 1) both;
+}
+.cat-sprite {
+  position: absolute;
+  inset: -29%;
+  transform: scaleX(var(--cat-facing));
+  filter: drop-shadow(0 3px 3px #23342630);
+}
+.cat-sprite .cat-front-paw {
+  transform-box: view-box;
+  transform-origin: 77px 63px;
+  animation: cat-paw var(--cat-visit-duration) ease-in-out both;
+}
+.cat-square-glow {
+  position: absolute;
+  inset: 3%;
+  border-radius: 50%;
+  background: #f5d77888;
+  animation: cat-glow var(--cat-visit-duration) ease-in-out both;
+}
+.cat-action-pawn {
+  position: absolute;
+  inset: 6%;
+  display: block;
+}
+.cat-action-pawn--add {
+  animation: cat-add-pawn var(--cat-visit-duration) ease-in-out both;
+}
+.cat-target[data-cat-phase="exit"] .cat-action-pawn--add {
+  visibility: hidden;
+}
+.cat-action-pawn--remove {
+  animation: cat-remove-pawn var(--cat-visit-duration) ease-in-out both;
+}
+.cat-action-spark {
+  position: absolute;
+  left: 42%;
+  top: 40%;
+  width: 20%;
+  height: 20%;
+  border: 2px solid #fff2ad;
+  border-radius: 50%;
+  animation: cat-spark var(--cat-visit-duration) ease-out both;
+}
+@keyframes cat-travel {
+  0% {
+    opacity: 0;
+    transform: translate(var(--cat-start-x), var(--cat-start-y)) scale(0.7) rotate(-7deg);
+  }
+  10% {
+    opacity: 1;
+  }
+  33% {
+    transform: translate(-8%, -28%) scale(1.06) rotate(-3deg);
+  }
+  41%,
+  66% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1) rotate(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--cat-start-x), var(--cat-start-y)) scale(0.72) rotate(7deg);
+  }
+}
+@keyframes cat-paw {
+  0%,
+  38%,
+  68%,
+  100% {
+    transform: rotate(0);
+  }
+  46%,
+  54% {
+    transform: rotate(-35deg);
+  }
+  60% {
+    transform: rotate(7deg);
+  }
+}
+@keyframes cat-glow {
+  0%,
+  25%,
+  100% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  45%,
+  65% {
+    opacity: 0.8;
+    transform: scale(1.08);
+  }
+}
+@keyframes cat-add-pawn {
+  0%,
+  42% {
+    opacity: 0;
+    transform: scale(0.25) translateY(-20%);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+  56%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes cat-remove-pawn {
+  0%,
+  45% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  54% {
+    opacity: 0.6;
+    transform: scale(0.7) translateY(-15%);
+  }
+  62%,
+  100% {
+    opacity: 0;
+    transform: scale(0.2) translateY(-40%);
+  }
+}
+@keyframes cat-spark {
+  0%,
+  43%,
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+  52% {
+    opacity: 1;
+    transform: scale(2.6);
+  }
+  66% {
+    opacity: 0;
+    transform: scale(3.8);
+  }
+}
+@media (max-width: 620px) {
+  .board-stage {
+    --board-frame: 4px;
+  }
+  .cat-match-settings {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+  .catchess-settings {
+    padding-left: 13px;
+    padding-right: 13px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cat-layer {
+    display: none;
+  }
+  .board-piece--cat-arrival {
+    visibility: visible;
+  }
+}

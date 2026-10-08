@@ -1,6 +1,6 @@
-import type { BoardPiece, Color, MoveInput } from "@chess-room/contracts";
+import type { BoardPiece, CatEffect, Color, MoveInput } from "@chess-room/contracts";
 import { useEffect, useRef, useState } from "react";
-
+import { CatVisit, useCatVisit } from "./CatVisit";
 import { Piece, pieceNames } from "./Piece";
 
 export function boardSquares(orientation: Color): string[] {
@@ -31,6 +31,9 @@ export function keyboardSquare(index: number, key: string, control = false): num
 }
 
 type BoardProps = {
+  gameId: string;
+  catEffects: CatEffect[];
+  latestPly: number;
   board: BoardPiece[];
   legalMoves: MoveInput[];
   orientation: Color;
@@ -45,6 +48,9 @@ type BoardProps = {
 };
 
 export function Board({
+  gameId,
+  catEffects,
+  latestPly,
   board,
   legalMoves,
   orientation,
@@ -63,6 +69,12 @@ export function Board({
   const squares = boardSquares(orientation);
   const bySquare = new Map(board.map((piece) => [piece.square, piece]));
   const available = selected && canMove ? legalMoves.filter((move) => move.from === selected) : [];
+  const visit = useCatVisit(gameId, catEffects);
+  const effect = visit.active;
+  const targetPiece = effect?.square ? bySquare.get(effect.square) : undefined;
+  const depictsCurrentPosition = effect !== null && effect.ply === latestPly;
+  const hideArrivingPawn =
+    depictsCurrentPosition && effect?.action === "add" && visit.phase !== "exit";
 
   useEffect(() => {
     void revision;
@@ -87,82 +99,114 @@ export function Board({
 
   return (
     <>
-      <table
-        className="chessboard"
-        aria-label="Chess board"
-        aria-describedby="board-help"
-        aria-busy={busy}
-        ref={boardRef}
-      >
-        <tbody>
-          {Array.from({ length: 8 }, (_, row) => (
-            <tr className="board-row" key={squares[row * 8]}>
-              {squares.slice(row * 8, row * 8 + 8).map((square, column) => {
-                const piece = bySquare.get(square);
-                const index = row * 8 + column;
-                const rank = Number(square[1]);
-                const file = square.charCodeAt(0) - 97;
-                const dark = (rank + file) % 2 === 0;
-                const target = available.some((move) => move.to === square);
-                const checked = inCheck && piece?.type === "k" && piece.color === turn;
-                const last = lastMove?.from === square || lastMove?.to === square;
-                const label = `${square}, ${piece ? `${piece.color} ${pieceNames[piece.type]}` : "empty"}${selected === square ? ", selected" : ""}${target ? ", legal destination" : ""}${checked ? ", in check" : ""}`;
-                return (
-                  <td key={square}>
-                    <button
-                      type="button"
-                      className={`square ${dark ? "square--dark" : "square--light"}${selected === square ? " square--selected" : ""}${target ? " square--target" : ""}${checked ? " square--check" : ""}${last ? " square--last" : ""}`}
-                      aria-label={label}
-                      aria-pressed={selected === square}
-                      aria-disabled={!canMove || busy}
-                      tabIndex={index === focused ? 0 : -1}
-                      data-index={index}
-                      data-square={square}
-                      onFocus={() => setFocused(index)}
-                      onClick={() => select(square)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape") setSelected(null);
-                        if (
-                          [
-                            "ArrowLeft",
-                            "ArrowRight",
-                            "ArrowUp",
-                            "ArrowDown",
-                            "Home",
-                            "End",
-                          ].includes(event.key)
-                        ) {
-                          event.preventDefault();
-                          const next = keyboardSquare(index, event.key, event.ctrlKey);
-                          setFocused(next);
-                          boardRef.current
-                            ?.querySelector<HTMLButtonElement>(`[data-index="${next}"]`)
-                            ?.focus();
-                        }
-                      }}
-                    >
-                      {column === 0 && (
-                        <span className="rank-label" aria-hidden="true">
-                          {square[1]}
-                        </span>
-                      )}
-                      {row === 7 && (
-                        <span className="file-label" aria-hidden="true">
-                          {square[0]}
-                        </span>
-                      )}
-                      {piece && <Piece type={piece.type} color={piece.color} />}
-                      {target && (
-                        <span className={piece ? "capture-hint" : "move-hint"} aria-hidden="true" />
-                      )}
-                    </button>
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="board-stage">
+        <table
+          className="chessboard"
+          aria-label="Chess board"
+          aria-describedby="board-help"
+          aria-busy={busy}
+          ref={boardRef}
+        >
+          <tbody>
+            {Array.from({ length: 8 }, (_, row) => (
+              <tr className="board-row" key={squares[row * 8]}>
+                {squares.slice(row * 8, row * 8 + 8).map((square, column) => {
+                  const piece = bySquare.get(square);
+                  const index = row * 8 + column;
+                  const rank = Number(square[1]);
+                  const file = square.charCodeAt(0) - 97;
+                  const dark = (rank + file) % 2 === 0;
+                  const target = available.some((move) => move.to === square);
+                  const checked = inCheck && piece?.type === "k" && piece.color === turn;
+                  const last = lastMove?.from === square || lastMove?.to === square;
+                  const pendingPawn =
+                    hideArrivingPawn &&
+                    square === effect?.square &&
+                    piece?.type === "p" &&
+                    piece.color === effect.color;
+                  const label = `${square}, ${piece ? `${piece.color} ${pieceNames[piece.type]}` : "empty"}${selected === square ? ", selected" : ""}${target ? ", legal destination" : ""}${checked ? ", in check" : ""}`;
+                  return (
+                    <td key={square}>
+                      <button
+                        type="button"
+                        className={`square ${dark ? "square--dark" : "square--light"}${selected === square ? " square--selected" : ""}${target ? " square--target" : ""}${checked ? " square--check" : ""}${last ? " square--last" : ""}`}
+                        aria-label={label}
+                        aria-pressed={selected === square}
+                        aria-disabled={!canMove || busy}
+                        tabIndex={index === focused ? 0 : -1}
+                        data-index={index}
+                        data-square={square}
+                        onFocus={() => setFocused(index)}
+                        onClick={() => select(square)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") setSelected(null);
+                          if (
+                            [
+                              "ArrowLeft",
+                              "ArrowRight",
+                              "ArrowUp",
+                              "ArrowDown",
+                              "Home",
+                              "End",
+                            ].includes(event.key)
+                          ) {
+                            event.preventDefault();
+                            const next = keyboardSquare(index, event.key, event.ctrlKey);
+                            setFocused(next);
+                            boardRef.current
+                              ?.querySelector<HTMLButtonElement>(`[data-index="${next}"]`)
+                              ?.focus();
+                          }
+                        }}
+                      >
+                        {column === 0 && (
+                          <span className="rank-label" aria-hidden="true">
+                            {square[1]}
+                          </span>
+                        )}
+                        {row === 7 && (
+                          <span className="file-label" aria-hidden="true">
+                            {square[0]}
+                          </span>
+                        )}
+                        {piece && (
+                          <span
+                            className={
+                              pendingPawn ? "board-piece board-piece--cat-arrival" : "board-piece"
+                            }
+                          >
+                            <Piece type={piece.type} color={piece.color} />
+                          </span>
+                        )}
+                        {target && (
+                          <span
+                            className={piece ? "capture-hint" : "move-hint"}
+                            aria-hidden="true"
+                          />
+                        )}
+                      </button>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {effect && (
+          <CatVisit
+            key={`${gameId}:${effect.ply}`}
+            effect={effect}
+            orientation={orientation}
+            phase={visit.phase}
+            showPawn={
+              depictsCurrentPosition &&
+              (effect.action === "remove"
+                ? targetPiece === undefined
+                : targetPiece?.type === "p" && targetPiece.color === effect.color)
+            }
+          />
+        )}
+      </div>
       <p className="board-help" id="board-help">
         Select a piece, then a highlighted square. Use arrow keys to navigate, Enter to select, and
         Escape to clear.
@@ -171,6 +215,9 @@ export function Board({
         {selected
           ? `${selected} selected. ${new Set(available.map((move) => move.to)).size} legal destinations.`
           : ""}
+      </span>
+      <span className="sr-only" role="status">
+        {visit.announcement}
       </span>
     </>
   );

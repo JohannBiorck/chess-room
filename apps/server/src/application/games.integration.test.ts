@@ -6,9 +6,9 @@ import {
   type GameView,
   gameViewSchema,
 } from "@chess-room/contracts";
-import { createEngineState } from "@chess-room/game-core";
+import { createEngineState, engineStateSchema } from "@chess-room/game-core";
 import { Pool } from "pg";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Database } from "../storage/database.js";
 import { migrate } from "../storage/migrations.js";
@@ -70,6 +70,151 @@ describe("durable game application", () => {
   async function act(view: GameView, actor: SessionRecord, action: GameAction): Promise<GameView> {
     return service.command(actor, view.game.id, command(view.game.revision, action));
   }
+
+  it("maps custom Catchess settings to the host's chosen seat and keeps settings with players after a rematch", async () => {
+    const created = await service.create(black, {
+      rulesetId: "catchess",
+      color: "black",
+      timeControl: "untimed",
+      catchess: { host: -35, guest: 70 },
+    });
+    expect(created.seat).toBe("black");
+    expect(created.game.catchess).toEqual({ white: 70, black: -35 });
+    let view = await service.join(white, created.invitation.token);
+    expect(gameViewSchema.parse(view).game.catchess).toEqual({ white: 70, black: -35 });
+    view = await act(view, black, { type: "resign" });
+    view = await act(view, black, { type: "request-rematch" });
+    view = await act(view, white, { type: "accept-rematch" });
+    if (!view.game.rematchGameId) throw new Error("A Catchess rematch was not created.");
+    const successor = await service.view(black, view.game.rematchGameId);
+    expect(successor.seat).toBe("white");
+    expect(successor.game.catchess).toEqual({ white: -35, black: 70 });
+    expect(successor.game.position.catEffects).toEqual([]);
+    expect(successor.game.position.board).toHaveLength(32);
+    expect((await service.view(white, successor.game.id)).seat).toBe("black");
+  });
+
+  it.each([
+    { chance: 100, action: "add", pawns: 9, pieces: 33 },
+    { chance: -100, action: "remove", pawns: 7, pieces: 31 },
+    { chance: 0, action: "none", pawns: 8, pieces: 32 },
+  ])(
+    "persists the guaranteed $action Catchess effect atomically with its move",
+    async ({ chance, action, pawns, pieces }) => {
+      service = new GameService(
+        database,
+        () => now,
+        () => "0".repeat(64),
+      );
+      const view = await start({ rulesetId: "catchess", catchess: { host: chance, guest: 0 } });
+      const accepted = await act(view, white, { type: "move", from: "e2", to: "e4" });
+      expect(accepted.game.position.board).toHaveLength(pieces);
+      expect(
+        accepted.game.position.board.filter(
+          (piece) => piece.type === "p" && piece.color === "white",
+        ),
+      ).toHaveLength(pawns);
+      expect(accepted.game.position.catEffects).toHaveLength(1);
+      const effect = accepted.game.position.catEffects?.[0];
+      expect(effect).toMatchObject({ ply: 1, color: "white", action });
+      if (action === "add") expect(effect?.square).toMatch(/^[a-h][1-4]$/);
+      const stored = await database.transaction((tx) => tx.getGame(view.game.id));
+      expect(engineStateSchema.parse(stored?.engineState).catTurns).toEqual([
+        { draw: "0".repeat(64), effect },
+      ]);
+      const events = await database.transaction((tx) => tx.listEvents(view.game.id, 1));
+      expect(events).toHaveLength(1);
+      expect(events[0]?.payload.catEffect).toEqual(effect);
+      expect(events[0]?.payload.fen).toBe(accepted.game.position.fen);
+      expect(JSON.stringify(accepted)).not.toContain("0".repeat(64));
+    },
+  );
+
+  it("draws server entropy only after authorization, revision and turn guards and never rerolls accepted retries", async () => {
+    const draw = vi.fn(() => "a".repeat(64));
+    service = new GameService(database, () => now, draw);
+    const view = await start({ rulesetId: "catchess", catchess: { host: 100, guest: -100 } });
+    const stranger = (await service.createSession("Stranger")).session;
+    const first = command(1, { type: "move", from: "e2", to: "e4" });
+    await expect(service.command(stranger, view.game.id, first)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    await expect(
+      service.command(white, view.game.id, { ...first, expectedRevision: 0 }),
+    ).rejects.toMatchObject({ code: "STALE_REVISION" });
+    await expect(
+      service.command(black, view.game.id, command(1, { type: "move", from: "e7", to: "e5" })),
+    ).rejects.toMatchObject({ code: "NOT_YOUR_TURN" });
+    expect(draw).not.toHaveBeenCalled();
+    const acknowledgements = await Promise.all([
+      service.command(white, view.game.id, first),
+      service.command(white, view.game.id, first),
+    ]);
+    expect(acknowledgements[0]).toEqual(acknowledgements[1]);
+    expect(draw).toHaveBeenCalledTimes(1);
+    const accepted = acknowledgements[0];
+    if (!accepted) throw new Error("Catchess move was not acknowledged.");
+    const later = await act(accepted, black, { type: "move", from: "e7", to: "e5" });
+    expect(draw).toHaveBeenCalledTimes(2);
+    expect(await service.command(white, view.game.id, first)).toEqual(accepted);
+    expect(draw).toHaveBeenCalledTimes(2);
+    await database.close();
+    database = new Database(connectionString, { options: `-c search_path=${schema}` });
+    service = new GameService(database, () => now, draw);
+    expect((await service.view(white, view.game.id)).game).toEqual(later.game);
+    expect(await service.command(white, view.game.id, first)).toEqual(accepted);
+    expect(draw).toHaveBeenCalledTimes(2);
+    const events = await database.transaction((tx) => tx.listEvents(view.game.id, 1));
+    expect(events).toHaveLength(2);
+  });
+
+  it("serializes competing Catchess commands without applying a second cat effect", async () => {
+    const draw = vi.fn(() => "b".repeat(64));
+    service = new GameService(database, () => now, draw);
+    const view = await start({ rulesetId: "catchess", catchess: { host: 100, guest: 0 } });
+    const results = await Promise.allSettled([
+      service.command(white, view.game.id, command(1, { type: "move", from: "e2", to: "e4" })),
+      service.command(white, view.game.id, command(1, { type: "move", from: "d2", to: "d4" })),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(rejected?.status === "rejected" ? rejected.reason : null).toMatchObject({
+      code: "STALE_REVISION",
+    });
+    expect(draw).toHaveBeenCalledTimes(1);
+    const current = await service.view(white, view.game.id);
+    expect(current.game.revision).toBe(2);
+    expect(current.game.position.moves).toHaveLength(1);
+    expect(current.game.position.catEffects).toHaveLength(1);
+    expect(current.game.position.board).toHaveLength(33);
+  });
+
+  it.each(["standard", "three-check"] as const)(
+    "reads old $0 records and acknowledgements without changing their wire shape",
+    async (rulesetId) => {
+      const view = await start({ rulesetId });
+      const move = command(1, { type: "move", from: "e2", to: "e4" });
+      const accepted = await service.command(white, view.game.id, move);
+      await database.pool.query(
+        "UPDATE matches SET rules_config='{}'::jsonb,engine_state=engine_state-'catchess'-'catTurns' WHERE id=$1",
+        [view.game.id],
+      );
+      await database.pool.query(
+        `UPDATE command_receipts SET acknowledgement=jsonb_set(
+      jsonb_set(acknowledgement,'{game}',(acknowledgement->'game')-'catchess'),
+      '{game,position}',(acknowledgement->'game'->'position')-'catEffects') WHERE match_id=$1`,
+        [view.game.id],
+      );
+      const restored = await service.view(white, view.game.id);
+      expect(restored.game).not.toHaveProperty("catchess");
+      expect(restored.game.position).not.toHaveProperty("catEffects");
+      expect(restored.game.position.fen).toBe(accepted.game.position.fen);
+      const retry = await service.command(white, view.game.id, move);
+      expect(retry).toStrictEqual(accepted);
+      expect(retry.game).not.toHaveProperty("catchess");
+      expect(retry.game.position).not.toHaveProperty("catEffects");
+    },
+  );
 
   it("claims exactly two seats despite simultaneous friends joining and retries a claimed invitation", async () => {
     const third = (await service.createSession("Third player")).session;

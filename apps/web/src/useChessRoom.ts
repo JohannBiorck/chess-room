@@ -1,4 +1,5 @@
 import {
+  type CatEffect,
   type CreateGame,
   type GameAction,
   type GameCommand,
@@ -22,6 +23,7 @@ import {
   rememberGame,
   request,
 } from "./api";
+import { liveCatEffects as collectLiveCatEffects } from "./catPresentation";
 
 export type Invitation = { token: string; expiresAt: number };
 type SessionResponse = { session: SessionView | null };
@@ -43,6 +45,7 @@ function parseGame(payload: unknown): GameView {
 export function useChessRoom() {
   const [session, setSession] = useState<SessionView | null>(null);
   const [view, setView] = useState<GameView | null>(null);
+  const [liveCatEffects, setLiveCatEffects] = useState<CatEffect[]>([]);
   const viewRef = useRef<GameView | null>(null);
   const [invitation, setInvitation] = useState<Invitation | null>(null);
   const [loading, setLoading] = useState(true);
@@ -57,9 +60,18 @@ export function useChessRoom() {
     () => new URLSearchParams(window.location.hash.slice(1)).get("invite") ?? "",
   );
 
-  const applyView = useCallback((next: GameView) => {
+  const applyView = useCallback((next: GameView, animate = false) => {
     const previous = viewRef.current;
     if (previous?.game.id === next.game.id && previous.game.revision > next.game.revision) return;
+    const arrivals = collectLiveCatEffects(
+      previous ? { id: previous.game.id, ply: previous.game.position.moves.length } : null,
+      { id: next.game.id, ply: next.game.position.moves.length },
+      next.game.position.catEffects ?? [],
+      animate,
+    );
+    if (previous?.game.id !== next.game.id) setLiveCatEffects([]);
+    else if (arrivals.length > 0)
+      setLiveCatEffects((effects) => [...effects, ...arrivals].slice(-24));
     viewRef.current = next;
     setView(next);
     setReceivedAt(performance.now());
@@ -165,7 +177,7 @@ export function useChessRoom() {
       if (!result.success || result.data.id !== gameId) return;
       const previous = viewRef.current;
       if (previous?.game.id === gameId && result.data.revision > previous.game.revision)
-        applyView({ game: result.data, seat: previous.seat });
+        applyView({ game: result.data, seat: previous.seat }, true);
     });
     // A snapshot also corrects clocks and recovers a missed broadcast without trusting socket recovery.
     const synchronize = () => {
@@ -259,7 +271,7 @@ export function useChessRoom() {
         `/api/games/${pending.gameId}/commands`,
         pending.command,
       );
-      applyView(parseGame(payload));
+      applyView(parseGame(payload), true);
     } catch (cause) {
       if (cause instanceof ApiError && (cause.status === 0 || cause.status >= 500)) {
         setRetry(pending);
@@ -329,6 +341,7 @@ export function useChessRoom() {
   function lobby() {
     viewRef.current = null;
     setView(null);
+    setLiveCatEffects([]);
     setInvitation(null);
     setRetry(null);
     setError(null);
@@ -339,6 +352,7 @@ export function useChessRoom() {
   return {
     session,
     view,
+    liveCatEffects,
     invitation,
     loading,
     busy,

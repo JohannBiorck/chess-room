@@ -1,7 +1,13 @@
 # Chess Room
 
-Play chess with a friend in a private browser room. Choose Standard chess or
-Three-check, share an invitation, and play with display names without accounts.
+Play chess with a friend in a private browser room. Choose Standard chess,
+Three-check or Catchess, share an invitation, and play with display names
+without accounts.
+
+In Catchess, each player has their own cat. Adjust each cat's slider in the
+lobby: a positive percentage can add a pawn on that player's half of the board;
+a negative percentage can remove one of their pawns. The cat acts after its
+player moves, with an animation and an entry in the move history.
 
 The server validates every move and stores games in PostgreSQL. Refreshing or
 reconnecting restores the board, history, result and clock. Supported controls

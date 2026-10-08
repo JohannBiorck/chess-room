@@ -83,6 +83,7 @@ export function App() {
           <GameRoom
             key={room.view.game.id}
             view={room.view}
+            liveCatEffects={room.liveCatEffects}
             invitation={room.invitation}
             receivedAt={room.receivedAt}
             busy={room.busy}
@@ -107,7 +108,7 @@ export function App() {
         <footer className="site-footer">
           <span className="footer-brand">Chess Room</span>
           <p>Private rooms. Shared moments. One more game.</p>
-          <span>STANDARD + THREE-CHECK</span>
+          <span>STANDARD · THREE-CHECK · CATCHESS</span>
         </footer>
       </div>
     </>

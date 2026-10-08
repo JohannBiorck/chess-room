@@ -2,14 +2,18 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import {
+  type CreateGame,
   type GameCommand,
   gameViewSchema,
   type PublicGame,
+  publicEnginePositionSchema,
+  publicGameSchema,
   type TimeControl,
 } from "@chess-room/contracts";
 import { Pool } from "pg";
 import { io as connectSocket, type Socket } from "socket.io-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import { Database } from "../storage/database.js";
 import { migrate } from "../storage/migrations.js";
@@ -21,6 +25,41 @@ if (!connectionString)
   throw new Error("A PostgreSQL URL is required for transport integration tests.");
 const origin = "http://127.0.0.1:5173";
 type Application = Awaited<ReturnType<typeof buildApplication>>;
+
+// Preserve the exact strict object fields understood by existing protocol-one clients.
+const gameFields = publicGameSchema.shape;
+const positionFields = publicEnginePositionSchema.shape;
+const previousGameSchema = z.strictObject({
+  id: gameFields.id,
+  revision: gameFields.revision,
+  phase: gameFields.phase,
+  rulesetId: z.enum(["standard", "three-check"]),
+  rulesVersion: gameFields.rulesVersion,
+  timeControl: gameFields.timeControl,
+  players: gameFields.players,
+  position: z.strictObject({
+    fen: positionFields.fen,
+    turn: positionFields.turn,
+    inCheck: positionFields.inCheck,
+    board: positionFields.board.max(32),
+    legalMoves: positionFields.legalMoves.max(256),
+    moves: positionFields.moves,
+    checks: positionFields.checks,
+    claimableDraws: positionFields.claimableDraws,
+    outcome: positionFields.outcome,
+  }),
+  clocks: gameFields.clocks,
+  outcome: gameFields.outcome,
+  drawOffer: gameFields.drawOffer,
+  rematchRequested: gameFields.rematchRequested,
+  rematchGameId: gameFields.rematchGameId,
+  createdAt: gameFields.createdAt,
+  updatedAt: gameFields.updatedAt,
+});
+const previousViewSchema = z.strictObject({
+  game: previousGameSchema,
+  seat: gameViewSchema.shape.seat,
+});
 
 describe("HTTP and real Socket.IO game transport", () => {
   let administrator: Pool;
@@ -82,21 +121,26 @@ describe("HTTP and real Socket.IO game transport", () => {
     return cookie;
   }
 
-  async function create(cookie: string, app = application, timeControl: TimeControl = "untimed") {
+  async function create(
+    cookie: string,
+    app = application,
+    timeControl: TimeControl = "untimed",
+    overrides: Partial<CreateGame> = {},
+  ) {
     const response = await app.server.inject({
       method: "POST",
       url: "/api/games",
       headers: { origin, cookie },
-      payload: { rulesetId: "standard", color: "white", timeControl },
+      payload: { rulesetId: "standard", color: "white", timeControl, ...overrides },
     });
     expect(response.statusCode).toBe(201);
     return response.json<{ game: PublicGame; invitation: { token: string } }>();
   }
 
-  async function startedGame() {
+  async function startedGame(overrides: Partial<CreateGame> = {}) {
     const whiteCookie = await guest("White");
     const blackCookie = await guest("Black");
-    const created = await create(whiteCookie);
+    const created = await create(whiteCookie, application, "untimed", overrides);
     const joined = await application.server.inject({
       method: "POST",
       url: "/api/invitations/join",
@@ -288,6 +332,169 @@ describe("HTTP and real Socket.IO game transport", () => {
     );
     expect(result.rows[0]?.count).toBe("0");
   });
+
+  it("validates signed Catchess settings and supplies defaults at the HTTP boundary", async () => {
+    const cookie = await guest("Host");
+    for (const payload of [
+      { rulesetId: "catchess", catchess: { host: -101, guest: 0 } },
+      { rulesetId: "catchess", catchess: { host: 0, guest: 101 } },
+      { rulesetId: "catchess", catchess: { host: 1.5, guest: 0 } },
+      { rulesetId: "catchess", catchess: { host: "25", guest: 0 } },
+      { rulesetId: "catchess", catchess: { host: 0, guest: 0, draw: "0".repeat(64) } },
+      { rulesetId: "standard", catchess: { host: 25, guest: 25 } },
+    ]) {
+      const response = await application.server.inject({
+        method: "POST",
+        url: "/api/games",
+        headers: { origin, cookie },
+        payload,
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    const created = await create(cookie, application, "untimed", { rulesetId: "catchess" });
+    expect(created.game.catchess).toEqual({ white: 25, black: 25 });
+    expect(created.game.position.catEffects).toEqual([]);
+  });
+
+  it("rejects client entropy and broadcasts authoritative Catchess effects across instances and reconnects", async () => {
+    const { whiteCookie, blackCookie, view } = await startedGame({
+      rulesetId: "catchess",
+      catchess: { host: 100, guest: -100 },
+    });
+    const secondDatabase = new Database(connectionString, { options: `-c search_path=${schema}` });
+    extraDatabases.push(secondDatabase);
+    const second = await buildApplication({
+      database: secondDatabase,
+      config: config(),
+      logger: false,
+      workers: false,
+    });
+    applications.push(second);
+    const addressOne = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const addressTwo = await second.server.listen({ port: 0, host: "127.0.0.1" });
+    const whiteSocket = await socketAt(addressOne, whiteCookie);
+    const blackSocket = await socketAt(addressTwo, blackCookie);
+    expect(gameViewSchema.parse(await subscribe(whiteSocket, view.game.id)).game.catchess).toEqual({
+      white: 100,
+      black: -100,
+    });
+    gameViewSchema.parse(await subscribe(blackSocket, view.game.id));
+    const move: GameCommand = {
+      protocolVersion: 1,
+      commandId: randomUUID(),
+      expectedRevision: 1,
+      action: { type: "move", from: "e2", to: "e4" },
+    };
+    for (const payload of [
+      { ...move, serverDraw: "0".repeat(64) },
+      { ...move, action: { ...move.action, draw: "0".repeat(64) } },
+      { ...move, catTurns: [{ draw: "0".repeat(64), effect: { action: "none" } }] },
+    ]) {
+      const response = await application.server.inject({
+        method: "POST",
+        url: `/api/games/${view.game.id}/commands`,
+        headers: { origin, cookie: whiteCookie },
+        payload,
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    const response = await postCommand(whiteCookie, view.game.id, move);
+    expect(response.statusCode).toBe(200);
+    const accepted = gameViewSchema.parse(response.json());
+    const whiteUpdate = updated(whiteSocket, 2);
+    const blackUpdate = updated(blackSocket, 2);
+    await application.tick();
+    await second.tick();
+    const received = await Promise.all([whiteUpdate, blackUpdate]);
+    for (const update of received) {
+      const game = publicGameSchema.parse(update);
+      expect(game.position.fen).toBe(accepted.game.position.fen);
+      expect(game.position.board).toEqual(accepted.game.position.board);
+      expect(game.position.board).toHaveLength(33);
+      expect(game.position.catEffects).toEqual(accepted.game.position.catEffects);
+      expect(game.position.catEffects?.[0]).toMatchObject({
+        ply: 1,
+        color: "white",
+        action: "add",
+      });
+    }
+    expect(received[0]).toEqual(received[1]);
+    blackSocket.disconnect();
+    const laterResponse = await postCommand(
+      blackCookie,
+      view.game.id,
+      {
+        protocolVersion: 1,
+        commandId: randomUUID(),
+        expectedRevision: 2,
+        action: { type: "move", from: "e7", to: "e5" },
+      },
+      second,
+    );
+    expect(laterResponse.statusCode).toBe(200);
+    const later = gameViewSchema.parse(laterResponse.json());
+    expect(later.game.position.board).toHaveLength(32);
+    expect(later.game.position.catEffects?.[1]).toMatchObject({
+      ply: 2,
+      color: "black",
+      action: "remove",
+    });
+    expect(
+      gameViewSchema.parse((await postCommand(whiteCookie, view.game.id, move)).json()),
+    ).toEqual(accepted);
+    const reconnected = await socketAt(addressTwo, blackCookie);
+    const restored = gameViewSchema.parse(await subscribe(reconnected, view.game.id));
+    expect(restored.game.position).toEqual(later.game.position);
+    expect(restored.game.catchess).toEqual({ white: 100, black: -100 });
+  });
+
+  it.each(["standard", "three-check"] as const)(
+    "preserves the strict protocol-one $0 HTTP, socket and receipt shapes",
+    async (rulesetId) => {
+      const { whiteCookie, blackCookie, view } = await startedGame({ rulesetId });
+      previousViewSchema.parse(view);
+      const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+      const socket = await socketAt(address, whiteCookie);
+      previousViewSchema.parse(await subscribe(socket, view.game.id));
+      const firstMove: GameCommand = {
+        protocolVersion: 1,
+        commandId: randomUUID(),
+        expectedRevision: 1,
+        action: { type: "move", from: "e2", to: "e4" },
+      };
+      const acceptedResponse = await postCommand(whiteCookie, view.game.id, firstMove);
+      expect(acceptedResponse.statusCode).toBe(200);
+      const accepted = previousViewSchema.parse(acceptedResponse.json());
+      const update = updated(socket, 2);
+      await application.tick();
+      previousGameSchema.parse(await update);
+      expect(
+        (
+          await postCommand(blackCookie, view.game.id, {
+            protocolVersion: 1,
+            commandId: randomUUID(),
+            expectedRevision: 2,
+            action: { type: "move", from: "e7", to: "e5" },
+          })
+        ).statusCode,
+      ).toBe(200);
+      const retryResponse = await postCommand(whiteCookie, view.game.id, firstMove);
+      expect(retryResponse.statusCode).toBe(200);
+      const retry = previousViewSchema.parse(retryResponse.json());
+      expect(retry).toStrictEqual(accepted);
+      const receipts = await database.pool.query<{ acknowledgement: unknown }>(
+        "SELECT acknowledgement FROM command_receipts WHERE match_id=$1 AND command_id=$2",
+        [view.game.id, firstMove.commandId],
+      );
+      expect(receipts.rows[0]?.acknowledgement).toStrictEqual(accepted);
+      const restoredResponse = await application.server.inject({
+        method: "GET",
+        url: `/api/games/${view.game.id}`,
+        headers: { cookie: whiteCookie },
+      });
+      expect(previousViewSchema.parse(restoredResponse.json()).game.revision).toBe(3);
+    },
+  );
 
   it("issues an HttpOnly guest cookie, retains identity and redacts internal session fields", async () => {
     const response = await application.server.inject({
@@ -554,42 +761,51 @@ describe("HTTP and real Socket.IO game transport", () => {
     await expect(socketAt(address, cookie)).rejects.toMatchObject({ message: "CONNECTION_LIMIT" });
   });
 
-  it("sends no success or uncommitted socket update when PostgreSQL rejects the commit", async () => {
-    const { whiteCookie, view } = await startedGame();
-    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
-    const socket = await socketAt(address, whiteCookie);
-    gameViewSchema.parse(await subscribe(socket, view.game.id));
-    const updates: PublicGame[] = [];
-    socket.on("game:updated", (game: PublicGame) => updates.push(game));
-    // A deferred foreign key rejects COMMIT, after the snapshot/event/receipt writes ran.
-    await database.pool.query(`CREATE TABLE commit_targets (id uuid PRIMARY KEY);
+  it.each(["standard", "catchess"] as const)(
+    "sends no success or uncommitted $0 socket update when PostgreSQL rejects the commit",
+    async (rulesetId) => {
+      const { whiteCookie, view } = await startedGame({
+        rulesetId,
+        ...(rulesetId === "catchess" ? { catchess: { host: 100, guest: 0 } } : {}),
+      });
+      const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+      const socket = await socketAt(address, whiteCookie);
+      gameViewSchema.parse(await subscribe(socket, view.game.id));
+      const updates: PublicGame[] = [];
+      socket.on("game:updated", (game: PublicGame) => updates.push(game));
+      // A deferred foreign key rejects COMMIT, after the snapshot/event/receipt writes ran.
+      await database.pool.query(`CREATE TABLE commit_targets (id uuid PRIMARY KEY);
       ALTER TABLE command_receipts ADD CONSTRAINT reject_commit
       FOREIGN KEY (match_id) REFERENCES commit_targets (id) DEFERRABLE INITIALLY DEFERRED`);
-    const response = await postCommand(whiteCookie, view.game.id, {
-      protocolVersion: 1,
-      commandId: randomUUID(),
-      expectedRevision: 1,
-      action: { type: "move", from: "e2", to: "e4" },
-    });
-    expect(response.statusCode).toBe(503);
-    expect(response.json()).toEqual({
-      error: {
-        code: "UNAVAILABLE",
-        message: "The service is temporarily unavailable. Please retry.",
-      },
-    });
-    await application.tick();
-    const currentResponse = await application.server.inject({
-      method: "GET",
-      url: `/api/games/${view.game.id}`,
-      headers: { cookie: whiteCookie },
-    });
-    const current = gameViewSchema.parse(currentResponse.json());
-    expect(current.game.revision).toBe(1);
-    expect(current.game.position.moves).toEqual([]);
-    expect(updates).toEqual([]);
-    expect(await database.transaction((tx) => tx.listEvents(view.game.id, 1))).toEqual([]);
-  });
+      const response = await postCommand(whiteCookie, view.game.id, {
+        protocolVersion: 1,
+        commandId: randomUUID(),
+        expectedRevision: 1,
+        action: { type: "move", from: "e2", to: "e4" },
+      });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({
+        error: {
+          code: "UNAVAILABLE",
+          message: "The service is temporarily unavailable. Please retry.",
+        },
+      });
+      await application.tick();
+      const currentResponse = await application.server.inject({
+        method: "GET",
+        url: `/api/games/${view.game.id}`,
+        headers: { cookie: whiteCookie },
+      });
+      const current = gameViewSchema.parse(currentResponse.json());
+      expect(current.game.revision).toBe(1);
+      expect(current.game.position.moves).toEqual([]);
+      if (rulesetId === "catchess") expect(current.game.position.catEffects).toEqual([]);
+      else expect(current.game.position).not.toHaveProperty("catEffects");
+      expect(current.game.position.board).toHaveLength(32);
+      expect(updates).toEqual([]);
+      expect(await database.transaction((tx) => tx.listEvents(view.game.id, 1))).toEqual([]);
+    },
+  );
 
   it("fans committed state across two instances, authorizes subscriptions and resyncs after reconnect", async () => {
     const { whiteCookie, blackCookie, view } = await startedGame();

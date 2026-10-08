@@ -1,6 +1,13 @@
-import { type CreateGame, RULESETS, type SessionView, TIME_CONTROLS } from "@chess-room/contracts";
+import {
+  type CatchessSettings as CatSettings,
+  type CreateGame,
+  RULESETS,
+  type SessionView,
+  TIME_CONTROLS,
+} from "@chess-room/contracts";
 import { useState } from "react";
-
+import { Cat } from "./Cat";
+import { CatchessSettings } from "./CatchessSettings";
 import { ArrowIcon, LinkIcon, ShieldIcon } from "./Icons";
 import { Piece, type PieceKind } from "./Piece";
 
@@ -38,7 +45,7 @@ function TableIllustration() {
         })}
       </div>
       <div className="illustration-note">
-        <span>01 / STANDARD &amp; THREE-CHECK</span>
+        <span>01 / THREE WAYS TO PLAY</span>
         <span>YOUR NEXT MOVE</span>
       </div>
     </div>
@@ -60,6 +67,7 @@ export function Lobby({
     timeControl: "untimed",
     color: "random",
   });
+  const [catSettings, setCatSettings] = useState<CatSettings>({ host: 25, guest: 25 });
   const [invite, setInvite] = useState(initialInvitation);
   const [tab, setTab] = useState<"create" | "join">(initialInvitation ? "join" : "create");
   const rules = RULESETS.find((entry) => entry.id === settings.rulesetId);
@@ -158,7 +166,13 @@ export function Lobby({
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              if (tab === "create") void onCreate(displayName.trim(), settings);
+              if (tab === "create")
+                void onCreate(
+                  displayName.trim(),
+                  settings.rulesetId === "catchess"
+                    ? { ...settings, catchess: catSettings }
+                    : settings,
+                );
               else void onJoin(displayName.trim(), invite);
             }}
           >
@@ -213,14 +227,20 @@ export function Lobby({
                           disabled={busy}
                         />
                         <span className="mode-piece">
-                          <Piece type={mode.id === "standard" ? "k" : "n"} color="black" />
+                          {mode.id === "catchess" ? (
+                            <Cat />
+                          ) : (
+                            <Piece type={mode.id === "standard" ? "k" : "n"} color="black" />
+                          )}
                         </span>
                         <span>
                           <strong>{mode.label}</strong>
                           <small>
                             {mode.id === "standard"
                               ? "The game you know"
-                              : "Three checks. A new challenge."}
+                              : mode.id === "three-check"
+                                ? "Three checks. A new challenge."
+                                : "A little luck. A little mischief."}
                           </small>
                         </span>
                       </label>
@@ -228,6 +248,9 @@ export function Lobby({
                   </div>
                   <p className="field-hint">{rules?.description}</p>
                 </fieldset>
+                {settings.rulesetId === "catchess" && (
+                  <CatchessSettings value={catSettings} disabled={busy} onChange={setCatSettings} />
+                )}
                 <div className="form-row">
                   <div className="form-field">
                     <label htmlFor="time-control">Time control</label>

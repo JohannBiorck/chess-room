@@ -1,4 +1,10 @@
-import type { BoardPiece, Color, GameOutcome, RulesetId } from "@chess-room/contracts";
+import type {
+  BoardPiece,
+  CatchessConfig,
+  Color,
+  GameOutcome,
+  RulesetId,
+} from "@chess-room/contracts";
 
 /** Adjudication variants that share standard legal chess movement. */
 export interface ChessRulesAdapter {
@@ -7,8 +13,8 @@ export interface ChessRulesAdapter {
   readonly pgnVariant: string | null;
   extraOutcome(checks: Readonly<Record<Color, number>>): GameOutcome | null;
   repetitionSuffix(checks: Readonly<Record<Color, number>>): string;
-  isDeadPosition(pieces: readonly BoardPiece[]): boolean;
-  canWinOnTime(pieces: readonly BoardPiece[], side: Color): boolean;
+  isDeadPosition(pieces: readonly BoardPiece[], catchess?: CatchessConfig): boolean;
+  canWinOnTime(pieces: readonly BoardPiece[], side: Color, catchess?: CatchessConfig): boolean;
 }
 
 function squareColor(square: string): number {
@@ -64,7 +70,26 @@ const threeCheck: ChessRulesAdapter = {
     pieces.some((piece) => piece.color === side && piece.type !== "k"),
 };
 
+const catchess: ChessRulesAdapter = {
+  id: "catchess",
+  version: 1,
+  pgnVariant: "Catchess",
+  extraOutcome: () => null,
+  repetitionSuffix: () => "",
+  isDeadPosition: (pieces, config) =>
+    !(config && (config.white > 0 || config.black > 0)) && standardDeadPosition(pieces),
+  canWinOnTime(pieces, side, config) {
+    if (config && config[side] > 0) return true;
+    // An opponent who can create pawns may supply material for a possible mate.
+    if (config && (config.white > 0 || config.black > 0)) {
+      return pieces.some((piece) => piece.color === side && piece.type !== "k");
+    }
+    return standard.canWinOnTime(pieces, side);
+  },
+};
+
 export const CHESS_RULES_ADAPTERS: Readonly<Record<RulesetId, ChessRulesAdapter>> = {
   standard,
   "three-check": threeCheck,
+  catchess,
 };

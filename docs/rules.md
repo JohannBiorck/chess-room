@@ -2,7 +2,7 @@
 
 Each game records its ruleset and rules version. The server validates moves;
 the browser's board and move hints are a public projection of that state.
-Version 1 supports standard chess and the curated Three-check mode. Both use
+Version 1 supports standard chess, Three-check and Catchess. All use
 the standard starting position and legal movement rules, including castling,
 en passant and promotion to a queen, rook, bishop or knight.
 
@@ -51,6 +51,47 @@ Only bare kings automatically draw for dead material. A bishop or knight can
 still deliver three checks, so the standard single-minor-piece draw does not
 apply in this mode.
 
+## Catchess, version 1
+
+Each player has an independent signed cat chance from -100 to 100. Positive
+values mean a helpful cat adds one of that player's pawns; negative values mean
+an evil cat removes one of their pawns. The magnitude is the percentage chance
+after each of that player's moves. Zero disables that player's cat. Both
+players default to 25, and the room creator can set each chance separately.
+Settings follow the players when a rematch swaps their colors.
+
+The chess move must be legal before the cat acts. After the accepted move, the
+server makes a fresh random draw and applies the cat effect before deciding
+check, checkmate, stalemate or a draw. A helpful cat chooses uniformly among
+empty squares on its player's own half: white ranks 1–4 or black ranks 5–8.
+Back ranks are included. A pawn added there moves forward normally and can
+double-step only from its usual starting rank. An evil cat chooses uniformly
+among that player's pawns anywhere on the board. Eligible targets exclude any
+effect that would expose that player's king. With no eligible target the cat
+skips its effect, even at a chance of 100 or -100.
+
+Applied pawn additions and removals reset the half-move draw counter.
+En-passant remains available after an unrelated effect, but disappears if the
+double-pushed pawn is removed or the capture destination becomes occupied.
+Castling rights follow the accepted chess moves; cats never add kings or rooks.
+Final move notation includes checks and mates created or removed by the effect.
+
+Checkmate, stalemate, draw offers and current-position repetition/half-move
+claims otherwise follow standard chess. Repetition compares the positions
+after complete turns, including the cat effect. The material-only automatic
+draws described above apply only when neither player has a positive chance:
+a helpful cat can create future mating material even from bare kings. This
+remains a conservative material policy rather than a general solver for every
+variant dead position.
+
+Accepted turns persist both their server-generated random input and their
+resulting effect. Replay recomputes and verifies every effect without drawing
+again. Refreshes, reconnects and accepted-command retries cannot reroll a turn.
+The public game contains the resulting effects, never the random inputs.
+Catchess PGN downloads retain every move, signed chance headers and a cat
+comment after each turn. They are annotated variant records; importing them
+into an ordinary chess PGN reader will not reproduce the cat mutations.
+
 ## Clocks and lifecycle
 
 Games may be untimed or use 5 minutes with no increment, 10 minutes with a
@@ -67,6 +108,11 @@ knights and cases where the opponent's pieces could help block its own king.
 This is a conservative material test rather than a general position solver.
 In Three-check, any piece other than a king is treated as capable of winning
 on time because it may deliver three checks.
+In Catchess, a player with a positive chance is treated as able to create
+future mating material. A bare king without that ability cannot win on time.
+With an opponent who can add pawns, an existing bishop or knight may also use
+that future opposing material in a possible mate. Otherwise the standard
+material test applies.
 
 Either player may resign. A draw offer requires the other player's acceptance;
 a player cannot accept their own offer. Finished games reject further moves.

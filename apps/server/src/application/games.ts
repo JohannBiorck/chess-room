@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
 import {
+  type CatchessConfig,
   type Color,
   type CreateGame,
   type GameCommand,
@@ -46,6 +47,7 @@ export class GameService {
   constructor(
     readonly database: Database,
     private readonly testNow?: () => number,
+    private readonly serverDraw: () => string = () => randomBytes(32).toString("hex"),
   ) {}
 
   private now(tx: Transaction) {
@@ -121,7 +123,10 @@ export class GameService {
     const players: PublicGame["players"] = { white: null, black: null };
     for (const seat of seats.rows) players[seat.color] = { displayName: seat.display_name };
     const state = engineStateSchema.parse(game.engineState);
-    const position = inspectEngine(state);
+    const enginePosition = inspectEngine(state);
+    const { catEffects, ...legacyPosition } = enginePosition;
+    const position =
+      state.rulesetId === "catchess" ? { ...legacyPosition, catEffects } : legacyPosition;
     const life = lifecycle(game);
     return {
       id: game.id,
@@ -130,6 +135,7 @@ export class GameService {
       rulesetId: state.rulesetId,
       rulesVersion: 1,
       timeControl: life.timeControl,
+      ...(state.rulesetId === "catchess" ? { catchess: state.catchess } : {}),
       players,
       position,
       clocks: life.remaining
@@ -150,7 +156,7 @@ export class GameService {
     };
   }
 
-  private fresh(config: CreateGame, now: number): GameRecord {
+  private fresh(config: CreateGame, now: number, catchess?: CatchessConfig): GameRecord {
     const initial = TIME_CONTROLS[config.timeControl].initialMs;
     const life: Lifecycle = {
       timeControl: config.timeControl,
@@ -169,7 +175,7 @@ export class GameService {
       rulesetId: config.rulesetId,
       rulesVersion: 1,
       rulesConfig: json(config),
-      engineState: json(createEngineState(config.rulesetId)),
+      engineState: json(createEngineState(config.rulesetId, undefined, catchess)),
       lifecycle: json(life),
       createdAt: now,
       updatedAt: now,
@@ -188,6 +194,7 @@ export class GameService {
     game.revision += 1;
     game.updatedAt = now;
     await tx.saveGame(game, previous);
+    const position = inspectEngine(engineStateSchema.parse(game.engineState));
     await tx.appendEvent({
       gameId: game.id,
       revision: game.revision,
@@ -196,7 +203,8 @@ export class GameService {
         phase: game.status,
         action: action ?? null,
         actor: actor ?? null,
-        fen: inspectEngine(engineStateSchema.parse(game.engineState)).fen,
+        fen: position.fen,
+        catEffect: action?.type === "move" ? (position.catEffects.at(-1) ?? null) : null,
         outcome: lifecycle(game).outcome,
         clocks: lifecycle(game).remaining,
         lifecycle: lifecycle(game),
@@ -262,8 +270,17 @@ export class GameService {
           429,
         );
       const now = await this.now(tx);
-      const game = this.fresh(config, now);
       const color = config.color === "random" ? (randomInt(2) ? "white" : "black") : config.color;
+      const settings = config.catchess ?? { host: 25, guest: 25 };
+      const game = this.fresh(
+        config,
+        now,
+        config.rulesetId === "catchess"
+          ? color === "white"
+            ? { white: settings.host, black: settings.guest }
+            : { white: settings.guest, black: settings.host }
+          : undefined,
+      );
       await tx.createGame(game);
       await tx.addSeat({ gameId: game.id, color, sessionId: actor.id });
       await tx.appendEvent({
@@ -478,8 +495,16 @@ export class GameService {
       if (!life.rematchRequested.includes(oppositeColor(seat)))
         throw new ApplicationError("NO_REMATCH", "Your opponent has not requested a rematch.", 409);
       const next = this.fresh(
-        { rulesetId: state.rulesetId, color: "random", timeControl: life.timeControl },
+        {
+          rulesetId: state.rulesetId,
+          color: "white",
+          timeControl: life.timeControl,
+          ...(state.catchess
+            ? { catchess: { host: state.catchess.black, guest: state.catchess.white } }
+            : {}),
+        },
         now,
+        state.catchess ? { white: state.catchess.black, black: state.catchess.white } : undefined,
       );
       const oldSeats = await tx.listSeats(game.id);
       for (const old of [...oldSeats].sort((a, b) => a.sessionId.localeCompare(b.sessionId)))
@@ -514,11 +539,15 @@ export class GameService {
       case "move": {
         if (position.turn !== seat)
           throw new ApplicationError("NOT_YOUR_TURN", "Wait for your opponent's move.", 409);
-        const next = applyEngineMove(state, {
-          from: action.from,
-          to: action.to,
-          ...(action.promotion ? { promotion: action.promotion } : {}),
-        });
+        const next = applyEngineMove(
+          state,
+          {
+            from: action.from,
+            to: action.to,
+            ...(action.promotion ? { promotion: action.promotion } : {}),
+          },
+          state.rulesetId === "catchess" ? this.serverDraw() : undefined,
+        );
         if (life.remaining && life.turnStartedAt !== null) {
           life.remaining[seat] =
             Math.max(0, life.remaining[seat] - (now - life.turnStartedAt)) +
