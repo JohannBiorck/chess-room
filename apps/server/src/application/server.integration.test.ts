@@ -398,11 +398,11 @@ describe("HTTP and real Socket.IO game transport", () => {
       });
       expect(response.statusCode).toBe(400);
     }
+    const whiteUpdate = updated(whiteSocket, 2);
+    const blackUpdate = updated(blackSocket, 2);
     const response = await postCommand(whiteCookie, view.game.id, move);
     expect(response.statusCode).toBe(200);
     const accepted = gameViewSchema.parse(response.json());
-    const whiteUpdate = updated(whiteSocket, 2);
-    const blackUpdate = updated(blackSocket, 2);
     await application.tick();
     await second.tick();
     const received = await Promise.all([whiteUpdate, blackUpdate]);
@@ -462,10 +462,10 @@ describe("HTTP and real Socket.IO game transport", () => {
         expectedRevision: 1,
         action: { type: "move", from: "e2", to: "e4" },
       };
+      const update = updated(socket, 2);
       const acceptedResponse = await postCommand(whiteCookie, view.game.id, firstMove);
       expect(acceptedResponse.statusCode).toBe(200);
       const accepted = previousViewSchema.parse(acceptedResponse.json());
-      const update = updated(socket, 2);
       await application.tick();
       previousGameSchema.parse(await update);
       expect(
@@ -807,6 +807,139 @@ describe("HTTP and real Socket.IO game transport", () => {
     },
   );
 
+  it("delivers a committed join to the waiting host without a worker cycle", async () => {
+    const whiteCookie = await guest("White");
+    const blackCookie = await guest("Black");
+    const created = await create(whiteCookie);
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const whiteSocket = await socketAt(address, whiteCookie);
+    gameViewSchema.parse(await subscribe(whiteSocket, created.game.id));
+    const update = updated(whiteSocket, 1);
+    const response = await application.server.inject({
+      method: "POST",
+      url: "/api/invitations/join",
+      headers: { origin, cookie: blackCookie },
+      payload: { token: created.invitation.token },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(await update).toEqual(gameViewSchema.parse(response.json()).game);
+    expect(application.scheduler).toBeUndefined();
+  });
+
+  it("delivers accepted moves to both players without polling and suppresses retry or rejected broadcasts", async () => {
+    const { whiteCookie, blackCookie, view } = await startedGame({
+      rulesetId: "catchess",
+      catchess: { host: 100, guest: -100 },
+    });
+    const strangerCookie = await guest("Stranger");
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const whiteSocket = await socketAt(address, whiteCookie);
+    const blackSocket = await socketAt(address, blackCookie);
+    const strangerSocket = await socketAt(address, strangerCookie);
+    gameViewSchema.parse(await subscribe(whiteSocket, view.game.id));
+    gameViewSchema.parse(await subscribe(blackSocket, view.game.id));
+    expect(await subscribe(strangerSocket, view.game.id)).toMatchObject({
+      error: { code: "FORBIDDEN" },
+    });
+    const strangerUpdates: PublicGame[] = [];
+    strangerSocket.on("game:updated", (game: PublicGame) => strangerUpdates.push(game));
+    const broadcasts = vi.spyOn(application.io, "to");
+    const projections = vi.spyOn(application.service, "publicView");
+    const command: GameCommand = {
+      protocolVersion: 1,
+      commandId: randomUUID(),
+      expectedRevision: 1,
+      action: { type: "move", from: "e2", to: "e4" },
+    };
+    const firstUpdates = [updated(whiteSocket, 2), updated(blackSocket, 2)];
+    const response = await postCommand(whiteCookie, view.game.id, command);
+    const accepted = gameViewSchema.parse(response.json());
+    expect(response.statusCode).toBe(200);
+    expect(await Promise.all(firstUpdates)).toEqual([accepted.game, accepted.game]);
+    expect(accepted.game.position.catEffects?.[0]?.action).toBe("add");
+    expect(application.scheduler).toBeUndefined();
+    expect(projections).not.toHaveBeenCalled();
+
+    const secondUpdates = [updated(whiteSocket, 3), updated(blackSocket, 3)];
+    const next = await postCommand(blackCookie, view.game.id, {
+      ...command,
+      commandId: randomUUID(),
+      expectedRevision: 2,
+      action: { type: "move", from: "e7", to: "e5" },
+    });
+    const second = gameViewSchema.parse(next.json());
+    expect(next.statusCode).toBe(200);
+    expect(await Promise.all(secondUpdates)).toEqual([second.game, second.game]);
+    expect(second.game.position.catEffects?.[1]?.action).toBe("remove");
+    expect(
+      gameViewSchema.parse((await postCommand(whiteCookie, view.game.id, command)).json()),
+    ).toEqual(accepted);
+    expect((await postCommand(strangerCookie, view.game.id, command)).statusCode).toBe(403);
+    expect(
+      (
+        await postCommand(blackCookie, view.game.id, {
+          ...command,
+          commandId: randomUUID(),
+          expectedRevision: 3,
+        })
+      ).statusCode,
+    ).toBe(409);
+    await application.tick();
+    expect(broadcasts).toHaveBeenCalledTimes(2);
+    expect(strangerUpdates).toEqual([]);
+  });
+
+  it("does not broadcast an older polling projection after a newer local move", async () => {
+    const { whiteCookie, blackCookie, view } = await startedGame();
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const socket = await socketAt(address, whiteCookie);
+    gameViewSchema.parse(await subscribe(socket, view.game.id));
+    const session = await application.service.session(whiteCookie.split("=")[1]);
+    if (!session) throw new Error("Guest session is missing.");
+    // Simulate a commit from another instance that this process must discover by polling.
+    await application.service.command(session, view.game.id, {
+      protocolVersion: 1,
+      commandId: randomUUID(),
+      expectedRevision: 1,
+      action: { type: "move", from: "e2", to: "e4" },
+    });
+    let signalReady: () => void = () => undefined;
+    let releaseProjection: () => void = () => undefined;
+    const ready = new Promise<void>((resolve) => {
+      signalReady = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      releaseProjection = resolve;
+    });
+    const project = application.service.publicView.bind(application.service);
+    vi.spyOn(application.service, "publicView").mockImplementationOnce(async (id) => {
+      const old = await project(id);
+      signalReady();
+      await released;
+      return old;
+    });
+    const broadcasts = vi.spyOn(application.io, "to");
+    const tick = application.tick();
+    try {
+      await ready;
+      const update = updated(socket, 3);
+      const response = await postCommand(blackCookie, view.game.id, {
+        protocolVersion: 1,
+        commandId: randomUUID(),
+        expectedRevision: 2,
+        action: { type: "move", from: "e7", to: "e5" },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(await update).toEqual(gameViewSchema.parse(response.json()).game);
+    } finally {
+      releaseProjection();
+      await tick;
+    }
+    expect(broadcasts).toHaveBeenCalledTimes(1);
+    await application.tick();
+    expect(broadcasts).toHaveBeenCalledTimes(1);
+  });
+
   it("fans committed state across two instances, authorizes subscriptions and resyncs after reconnect", async () => {
     const { whiteCookie, blackCookie, view } = await startedGame();
     const strangerCookie = await guest("Stranger");
@@ -837,9 +970,9 @@ describe("HTTP and real Socket.IO game transport", () => {
       expectedRevision: 1,
       action: { type: "move", from: "e2", to: "e4" },
     };
-    expect((await postCommand(whiteCookie, view.game.id, firstMove)).statusCode).toBe(200);
     const whiteUpdate = updated(whiteSocket, 2);
     const blackUpdate = updated(blackSocket, 2);
+    expect((await postCommand(whiteCookie, view.game.id, firstMove)).statusCode).toBe(200);
     await application.tick();
     await second.tick();
     const received = await Promise.all([whiteUpdate, blackUpdate]);

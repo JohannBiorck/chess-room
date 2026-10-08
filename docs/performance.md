@@ -121,8 +121,14 @@ instantaneous figures do not establish peak connection counts or queue lengths.
 The run demonstrates that players connected to two backend instances converge
 on one PostgreSQL-authoritative game, including a retry and reconnect. It does
 not determine a maximum player count, an internet-latency target, or behavior
-under sustained pressure. The application currently checks subscribed revisions
-on a 250 ms worker cadence, which contributes to delivery latency.
+under sustained pressure. The measured version checked subscribed revisions
+on a 250 ms worker cadence, which contributed to delivery latency. Accepted
+commands and joins now also publish their committed projection immediately to
+local subscribers, without waiting for that worker. Cross-instance delivery
+and missed-update recovery retain the 250 ms cadence. The acting player's board
+previews a legal move before acknowledgement, while game history, clocks and
+cat effects await the server. The measurements above describe the earlier
+version; they are not latency measurements for these changes.
 
 Exact database lock-wait durations and true continuous memory peaks were not
 captured by this baseline. Before choosing a hosting size, repeat

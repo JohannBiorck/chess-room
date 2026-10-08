@@ -4,6 +4,7 @@ import {
   gameCommandSchema,
   guestSessionSchema,
   joinInvitationSchema,
+  type PublicGame,
 } from "@chess-room/contracts";
 import cookie from "@fastify/cookie";
 import staticFiles from "@fastify/static";
@@ -156,12 +157,20 @@ export async function buildApplication(options: {
   server.post("/api/invitations/join", { bodyLimit: 16_384 }, async (request) => {
     const session = await actor(request);
     await rateLimit(database, `join:${session.id}`, 20);
-    return service.join(session, joinInvitationSchema.parse(request.body).token);
+    const view = await service.join(session, joinInvitationSchema.parse(request.body).token);
+    publish(view.game);
+    return view;
   });
   server.post("/api/games/:id/commands", { bodyLimit: 16_384 }, async (request) => {
     const session = await actor(request);
     await rateLimit(database, `command:${session.id}`, 120);
-    return service.command(session, gameId(request), gameCommandSchema.parse(request.body));
+    const view = await service.command(
+      session,
+      gameId(request),
+      gameCommandSchema.parse(request.body),
+    );
+    publish(view.game);
+    return view;
   });
   server.get("/api/games/:id/pgn", async (request, reply) => {
     const id = gameId(request);
@@ -206,6 +215,20 @@ export async function buildApplication(options: {
     }
   });
   const revisions = new Map<string, number>();
+  const publish = (game: PublicGame) => {
+    const previous = revisions.get(game.id);
+    if (
+      previous === undefined ||
+      game.revision <= previous ||
+      !io.sockets.adapter.rooms.has(`game:${game.id}`)
+    )
+      return;
+    // HTTP projections are already committed. Deliver them without another database
+    // read, and prevent a slower in-flight polling projection from going backwards.
+    io.to(`game:${game.id}`).emit("game:updated", game);
+    metrics.fanoutDelay.add(Math.max(0, Date.now() - game.updatedAt));
+    revisions.set(game.id, game.revision);
+  };
   io.on("connection", (socket) => {
     const session = socket.data.session as SessionRecord;
     // Long guest lifetimes exceed Node's maximum single timeout duration.
@@ -272,11 +295,7 @@ export async function buildApplication(options: {
         );
         if ((current.rows[0]?.revision ?? -1) > previous) {
           const game = await service.publicView(id);
-          if (game) {
-            io.to(`game:${id}`).emit("game:updated", game);
-            metrics.fanoutDelay.add(Math.max(0, Date.now() - game.updatedAt));
-            revisions.set(id, game.revision);
-          }
+          if (game) publish(game);
         }
       }
     })().finally(() => {

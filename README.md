@@ -14,6 +14,10 @@ reconnecting restores the board, history, result and clock. Supported controls
 are untimed, 5+0, 10+5 and 15+10. Players can resign, offer or claim a draw,
 rematch with colors swapped, and download PGN.
 
+Legal moves appear immediately on your board while the server confirms them.
+Confirmed moves and cat visits are shared with both players; a rejected move
+restores the saved position.
+
 [Play Chess Room online](https://chess-room-c09w.onrender.com). The free service
 can take approximately a minute to wake after inactivity. Read
 [hosting limits](docs/hosting.md) before starting a timed game.

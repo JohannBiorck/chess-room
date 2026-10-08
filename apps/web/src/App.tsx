@@ -84,6 +84,7 @@ export function App() {
             key={room.view.game.id}
             view={room.view}
             liveCatEffects={room.liveCatEffects}
+            pendingMove={room.pendingMove}
             invitation={room.invitation}
             receivedAt={room.receivedAt}
             busy={room.busy}

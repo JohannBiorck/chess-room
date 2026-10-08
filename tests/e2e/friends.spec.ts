@@ -1,5 +1,13 @@
-import { gameViewSchema } from "@chess-room/contracts";
-import { type Browser, type BrowserContext, expect, type Page, test } from "@playwright/test";
+import { type GameCommand, gameCommandSchema, gameViewSchema } from "@chess-room/contracts";
+import {
+  type Browser,
+  type BrowserContext,
+  expect,
+  type Page,
+  type Route,
+  test,
+  type WebSocketRoute,
+} from "@playwright/test";
 
 type Players = {
   host: Page;
@@ -8,6 +16,44 @@ type Players = {
   invitation: string;
   pageErrors: string[];
 };
+
+const SESSION_BUDGET_WINDOW_MS = 60_050;
+const SESSION_BUDGET = 18;
+const sessionReservations: number[] = [];
+let firstTestInWorker = true;
+
+test.beforeEach(async ({ browser: _browser }, testInfo) => {
+  // Two guest sessions per room, with spare capacity for the stranger test.
+  // A replacement worker cannot remember the previous worker's reservations.
+  const recoveryWait = firstTestInWorker && testInfo.workerIndex > 0 ? SESSION_BUDGET_WINDOW_MS : 0;
+  firstTestInWorker = false;
+  if (recoveryWait > 0) {
+    testInfo.setTimeout(testInfo.timeout + recoveryWait);
+    await new Promise((resolve) => setTimeout(resolve, recoveryWait));
+  }
+  while (true) {
+    const now = Date.now();
+    while (
+      sessionReservations[0] !== undefined &&
+      sessionReservations[0] + SESSION_BUDGET_WINDOW_MS <= now
+    )
+      sessionReservations.shift();
+    if (sessionReservations.length + 2 <= SESSION_BUDGET) {
+      sessionReservations.push(now, now);
+      return;
+    }
+    const wait = (sessionReservations[0] ?? now) + SESSION_BUDGET_WINDOW_MS - now;
+    testInfo.setTimeout(testInfo.timeout + wait);
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+});
+
+test.afterEach(() => {
+  // Retain slots through the end of the test: session requests happen after
+  // its reservation, so expiring slots from its start can release them early.
+  const completedAt = Date.now();
+  sessionReservations.splice(-2, 2, completedAt, completedAt);
+});
 
 async function createRoom(
   browser: Browser,
@@ -77,6 +123,41 @@ async function readGame(page: Page) {
   const response = await page.request.get(`/api/games/${id}`);
   expect(response.status()).toBe(200);
   return gameViewSchema.parse(await response.json());
+}
+
+async function holdNextCommand(
+  page: Page,
+  transform: (command: GameCommand) => GameCommand = (command) => command,
+) {
+  const commands: GameCommand[] = [];
+  let release = () => {};
+  let entered = () => {};
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const requested = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const pattern = /\/api\/games\/[^/]+\/commands$/;
+  const handler = async (route: Route) => {
+    const command = gameCommandSchema.parse(route.request().postDataJSON());
+    commands.push(command);
+    if (commands.length === 1) {
+      entered();
+      await released;
+    }
+    await route.continue({ postData: JSON.stringify(transform(command)) });
+  };
+  await page.route(pattern, handler);
+  return {
+    commands,
+    requested,
+    release,
+    async dispose() {
+      release();
+      await page.unroute(pattern, handler);
+    },
+  };
 }
 
 async function auditCatVisits(page: Page) {
@@ -151,6 +232,108 @@ async function closePlayers(players: Players): Promise<void> {
   await Promise.all(players.contexts.map((context) => context.close()));
   expect(players.pageErrors).toEqual([]);
 }
+
+test("a legal move displays immediately while the real command is held and cannot be sent twice", async ({
+  browser,
+}, testInfo) => {
+  const players = await createRoom(browser);
+  const gate = await holdNextCommand(players.host);
+  try {
+    await joinRoom(players);
+    await move(players.host, "e2", "e4");
+    await gate.requested;
+    await expect(players.host.locator('[data-square="e2"]')).toHaveAttribute("aria-label", /empty/);
+    await expect(players.host.locator('[data-square="e4"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    await expect(players.host.getByRole("table", { name: "Chess board" })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    await expect(players.host.locator('[data-square="d2"]')).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    await players.host.locator('[data-square="d2"]').click({ force: true });
+    await players.host.locator('[data-square="d4"]').click({ force: true });
+    await expect(players.host.locator('[data-square="d2"]')).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(gate.commands).toHaveLength(1);
+    await expect(players.host.getByText("0 moves", { exact: true })).toBeVisible();
+    await players.host.screenshot({
+      path: testInfo.outputPath("immediate-move-preview.png"),
+      fullPage: true,
+    });
+    const stored = (await readGame(players.host)).game;
+    expect(stored.position.moves).toHaveLength(0);
+    expect(stored.position.board).toContainEqual({ square: "e2", type: "p", color: "white" });
+    await expect(players.friend.locator('[data-square="e2"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    gate.release();
+    await expect(players.friend.locator('[data-square="e4"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    await expect(players.host.getByText("1 move", { exact: true })).toBeVisible();
+    await expect(players.host.getByRole("table", { name: "Chess board" })).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+    expect((await readGame(players.host)).game.position.moves).toHaveLength(1);
+  } finally {
+    await gate.dispose();
+    await closePlayers(players);
+  }
+});
+
+test("a server rejection rolls back an immediate move preview and restores legal input", async ({
+  browser,
+}) => {
+  const players = await createRoom(browser);
+  const gate = await holdNextCommand(players.host, (command) => ({
+    ...command,
+    expectedRevision: command.expectedRevision - 1,
+  }));
+  try {
+    await joinRoom(players);
+    await move(players.host, "e2", "e4");
+    await gate.requested;
+    await expect(players.host.locator('[data-square="e4"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    gate.release();
+    await expect(players.host.getByRole("alert")).toContainText(
+      "The game changed. Refresh and try again.",
+    );
+    await expect(players.host.locator('[data-square="e4"]')).toHaveAttribute("aria-label", /empty/);
+    await expect(players.host.locator('[data-square="e2"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    await expect(players.host.locator('[data-square="e2"]')).toHaveAttribute(
+      "aria-disabled",
+      "false",
+    );
+    await expect(players.host.getByText("0 moves", { exact: true })).toBeVisible();
+    expect((await readGame(players.friend)).game.position.moves).toHaveLength(0);
+    await gate.dispose();
+    await players.host.getByRole("button", { name: "Dismiss error" }).click();
+    await move(players.host, "e2", "e4");
+    await expect(players.friend.locator('[data-square="e4"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+  } finally {
+    await gate.dispose();
+    await closePlayers(players);
+  }
+});
 
 test("a lost command acknowledgement retries the same command without applying the move twice", async ({
   browser,
@@ -312,6 +495,7 @@ test("keyboard moves, mobile layout, draw offers, and offline recovery converge"
 
 test("a real promotion presents every choice and supports underpromotion", async ({ browser }) => {
   const players = await createRoom(browser);
+  let gate: Awaited<ReturnType<typeof holdNextCommand>> | null = null;
   try {
     await joinRoom(players);
     for (const [from, to, actor] of [
@@ -330,13 +514,104 @@ test("a real promotion presents every choice and supports underpromotion", async
     await expect(dialog).toBeVisible();
     for (const name of ["queen", "rook", "bishop", "knight"])
       await expect(dialog.getByRole("button", { name, exact: true })).toBeEnabled();
+    gate = await holdNextCommand(players.host);
     await dialog.getByRole("button", { name: "knight", exact: true }).click();
+    await gate.requested;
+    await expect(players.host.locator('[data-square="a8"]')).toHaveAttribute(
+      "aria-label",
+      /white knight/,
+    );
+    await expect(players.host.locator('[data-square="b7"]')).toHaveAttribute("aria-label", /empty/);
+    await expect(players.friend.locator('[data-square="a8"]')).toHaveAttribute(
+      "aria-label",
+      /black rook/,
+    );
+    expect((await readGame(players.host)).game.position.moves).toHaveLength(8);
+    gate.release();
     await expect(players.friend.locator('[data-square="a8"]')).toHaveAttribute(
       "aria-label",
       /white knight/,
     );
     await expect(players.host.getByRole("cell", { name: "bxa8=N", exact: true })).toBeVisible();
   } finally {
+    await gate?.dispose();
+    await closePlayers(players);
+  }
+});
+
+test("immediate move previews relocate both castling pieces and remove an en-passant victim", async ({
+  browser,
+}) => {
+  const players = await createRoom(browser);
+  let gate: Awaited<ReturnType<typeof holdNextCommand>> | null = null;
+  try {
+    await joinRoom(players);
+    for (const [from, to, actor] of [
+      ["e2", "e4", "host"],
+      ["a7", "a6", "friend"],
+      ["g1", "f3", "host"],
+      ["a6", "a5", "friend"],
+      ["f1", "e2", "host"],
+      ["h7", "h6", "friend"],
+    ] as const)
+      await move(players[actor], from, to);
+    gate = await holdNextCommand(players.host);
+    await move(players.host, "e1", "g1");
+    await gate.requested;
+    await expect(players.host.locator('[data-square="g1"]')).toHaveAttribute(
+      "aria-label",
+      /white king/,
+    );
+    await expect(players.host.locator('[data-square="f1"]')).toHaveAttribute(
+      "aria-label",
+      /white rook/,
+    );
+    for (const square of ["e1", "h1"])
+      await expect(players.host.locator(`[data-square="${square}"]`)).toHaveAttribute(
+        "aria-label",
+        /empty/,
+      );
+    expect((await readGame(players.host)).game.position.moves).toHaveLength(6);
+    gate.release();
+    await expect(players.friend.locator('[data-square="g1"]')).toHaveAttribute(
+      "aria-label",
+      /white king/,
+    );
+    await gate.dispose();
+    gate = null;
+    for (const [from, to, actor] of [
+      ["h6", "h5", "friend"],
+      ["e4", "e5", "host"],
+      ["d7", "d5", "friend"],
+    ] as const)
+      await move(players[actor], from, to);
+    gate = await holdNextCommand(players.host);
+    await move(players.host, "e5", "d6");
+    await gate.requested;
+    await expect(players.host.locator('[data-square="d6"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    for (const square of ["e5", "d5"])
+      await expect(players.host.locator(`[data-square="${square}"]`)).toHaveAttribute(
+        "aria-label",
+        /empty/,
+      );
+    const stored = (await readGame(players.host)).game;
+    expect(stored.position.moves).toHaveLength(10);
+    expect(stored.position.board).toContainEqual({ square: "d5", type: "p", color: "black" });
+    gate.release();
+    await expect(players.friend.locator('[data-square="d6"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    await expect(players.friend.locator('[data-square="d5"]')).toHaveAttribute(
+      "aria-label",
+      /empty/,
+    );
+    await expect(players.host.getByRole("cell", { name: "exd6", exact: true })).toBeVisible();
+  } finally {
+    await gate?.dispose();
     await closePlayers(players);
   }
 });
@@ -416,6 +691,200 @@ test("Catchess sliders keep independent signed chances and omit cat settings in 
   expect(body).toEqual({ rulesetId: "standard", color: "random", timeControl: "untimed" });
 });
 
+test("Catchess previews only the chess move and both friends see cat visits when a snapshot beats its socket event", async ({
+  browser,
+}) => {
+  const players = await createRoom(browser, {
+    mode: "catchess",
+    cats: { host: 100, guest: 100 },
+  });
+  const delayedEvents: (() => void)[] = [];
+  let delayUpdates = true;
+  await players.friend.routeWebSocket(/\/socket\.io\//, (socket) => {
+    const server = socket.connectToServer();
+    server.onMessage((message) => {
+      if (delayUpdates && typeof message === "string" && message.includes('"game:updated"'))
+        delayedEvents.push(() => socket.send(message));
+      else socket.send(message);
+    });
+  });
+  const gate = await holdNextCommand(players.host);
+  try {
+    await joinRoom(players);
+    await auditCatVisits(players.host);
+    await auditCatVisits(players.friend);
+    await players.host.bringToFront();
+    await move(players.host, "e2", "e4");
+    await gate.requested;
+    await expect(players.host.locator('[data-square="e4"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    await expect(players.host.locator('.chessboard button[aria-label*="white pawn"]')).toHaveCount(
+      8,
+    );
+    await expect(players.host.locator(".cat-layer")).toHaveCount(0);
+    await expect(players.host.locator(".cat-history-effect")).toHaveCount(0);
+    expect((await readGame(players.host)).game.position.moves).toHaveLength(0);
+    gate.release();
+    await expect(players.host.locator('[data-cat-action="add"]')).toHaveAttribute(
+      "data-cat-edge",
+      "bottom",
+    );
+    await expect.poll(() => delayedEvents.length).toBeGreaterThan(0);
+    await expect(players.host.locator(".cat-layer")).toHaveCount(0);
+    const snapshot = players.friend.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        /\/api\/games\/[^/]+$/.test(new URL(response.url()).pathname) &&
+        response.status() === 200,
+    );
+    await players.friend.bringToFront();
+    await snapshot;
+    await expect(players.friend.locator('[data-cat-action="add"]')).toBeVisible();
+    await expect(players.friend.locator('[data-cat-action="add"]')).toHaveAttribute(
+      "data-cat-edge",
+      "top",
+    );
+    await expect(players.friend.locator('[data-square="e4"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    const game = (await readGame(players.friend)).game;
+    const added = game.position.catEffects?.[0];
+    expect(added?.action).toBe("add");
+    await expect(players.friend.locator('[data-cat-ply="1"]')).toHaveAttribute(
+      "data-cat-square",
+      added?.square ?? "",
+    );
+    delayUpdates = false;
+    for (const deliver of delayedEvents.splice(0)) deliver();
+    await expect(players.friend.locator(".cat-layer")).toHaveCount(0);
+    expect(await players.friend.evaluate(() => Reflect.get(window, "catVisitAudit"))).toEqual([
+      "1",
+    ]);
+    expect(await players.host.evaluate(() => Reflect.get(window, "catVisitAudit"))).toEqual(["1"]);
+    await move(players.friend, "e7", "e5");
+    await expect(players.friend.locator('[data-cat-ply="2"]')).toHaveAttribute(
+      "data-cat-edge",
+      "bottom",
+    );
+    await expect(players.host.locator('[data-cat-ply="2"]')).toHaveAttribute(
+      "data-cat-edge",
+      "top",
+    );
+    await expect(players.host.locator('[data-cat-ply="2"]')).toBeVisible();
+    await expect(players.host.locator(".cat-layer")).toHaveCount(0);
+    await expect(players.friend.locator(".cat-layer")).toHaveCount(0);
+    for (const page of [players.host, players.friend])
+      expect(await page.evaluate(() => Reflect.get(window, "catVisitAudit"))).toEqual(["1", "2"]);
+  } finally {
+    delayUpdates = false;
+    for (const deliver of delayedEvents.splice(0)) deliver();
+    await gate.dispose();
+    await closePlayers(players);
+  }
+});
+
+test("an obsolete HTTP refresh cannot consume a new cat visit after the socket reconnects", async ({
+  browser,
+}) => {
+  const players = await createRoom(browser, {
+    mode: "catchess",
+    cats: { host: 100, guest: 0 },
+  });
+  const sockets: WebSocketRoute[] = [];
+  const delayedEvents: (() => void)[] = [];
+  let holdEvents = false;
+  await players.friend.routeWebSocket(/\/socket\.io\//, (socket) => {
+    sockets.push(socket);
+    const server = socket.connectToServer();
+    server.onMessage((message) => {
+      if (holdEvents && typeof message === "string" && message.includes('"game:updated"'))
+        delayedEvents.push(() => socket.send(message));
+      else socket.send(message);
+    });
+  });
+  let releaseOld = () => {};
+  let oldRequested = () => {};
+  let capturedOld = false;
+  const released = new Promise<void>((resolve) => {
+    releaseOld = resolve;
+  });
+  const requested = new Promise<void>((resolve) => {
+    oldRequested = resolve;
+  });
+  try {
+    await joinRoom(players);
+    await auditCatVisits(players.friend);
+    await players.friend.route(/\/api\/games\/[^/]+$/, async (route) => {
+      if (capturedOld) {
+        await route.continue();
+        return;
+      }
+      capturedOld = true;
+      oldRequested();
+      await released;
+      // This old refresh receives genuine newer state, after a new socket subscription.
+      await route.fulfill({ response: await route.fetch() });
+    });
+    await players.host.bringToFront();
+    await players.friend.bringToFront();
+    await requested;
+    const original = sockets[0];
+    if (!original) throw new Error("The initial socket connection is missing.");
+    await original.close({ code: 1001, reason: "Transport interruption" });
+    await expect(players.friend.getByText("Reconnecting…", { exact: true })).toBeVisible();
+    await expect.poll(() => sockets.length).toBeGreaterThanOrEqual(2);
+    await expect(players.friend.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(players.friend.getByText("0 moves", { exact: true })).toBeVisible();
+    holdEvents = true;
+    await move(players.host, "e2", "e4");
+    await expect(players.host.getByText("1 move", { exact: true })).toBeVisible();
+    await expect.poll(() => delayedEvents.length).toBeGreaterThan(0);
+    const responsePromise = players.friend.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        /\/api\/games\/[^/]+$/.test(new URL(response.url()).pathname) &&
+        response.status() === 200,
+    );
+    releaseOld();
+    const obsoleteResponse = await responsePromise;
+    expect(gameViewSchema.parse(await obsoleteResponse.json()).game.position.moves).toHaveLength(1);
+    await obsoleteResponse.finished();
+    await players.friend.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    await expect(players.friend.getByText("0 moves", { exact: true })).toBeVisible();
+    await expect(players.friend.locator('[data-square="e2"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    await expect(players.friend.locator(".cat-history-effect")).toHaveCount(0);
+    await expect(players.friend.locator(".cat-layer")).toHaveCount(0);
+    holdEvents = false;
+    for (const deliver of delayedEvents.splice(0)) deliver();
+    await expect(players.friend.locator('[data-cat-ply="1"]')).toBeVisible();
+    await expect(players.friend.locator('[data-square="e4"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    await expect(players.friend.getByText("1 move", { exact: true })).toBeVisible();
+    await expect(players.friend.locator(".cat-layer")).toHaveCount(0);
+    expect(await players.friend.evaluate(() => Reflect.get(window, "catVisitAudit"))).toEqual([
+      "1",
+    ]);
+  } finally {
+    releaseOld();
+    holdEvents = false;
+    for (const deliver of delayedEvents.splice(0)) deliver();
+    await closePlayers(players);
+  }
+});
+
 test("Catchess animates committed pawn actions in both orientations once and restores history", async ({
   browser,
 }, testInfo) => {
@@ -480,13 +949,23 @@ test("Catchess animates committed pawn actions in both orientations once and res
     await move(players.friend, "e7", "e5");
     const removal = players.friend.locator('[data-cat-action="remove"]');
     await expect(removal).toHaveAttribute("data-cat-edge", "bottom");
-    await players.friend.waitForFunction(
+    await expect(players.host.locator('[data-cat-action="remove"]')).toHaveAttribute(
+      "data-cat-edge",
+      "top",
+    );
+    await expect(players.host.locator('[data-cat-action="remove"]')).toBeVisible();
+    await players.host.bringToFront();
+    await players.host.waitForFunction(
       () =>
         document.querySelector('[data-cat-action="remove"]')?.getAttribute("data-cat-phase") ===
         "paw",
       undefined,
       { polling: "raf", timeout: 5000 },
     );
+    await players.host.screenshot({
+      path: testInfo.outputPath("opponent-cat-visit.png"),
+      fullPage: true,
+    });
     const final = (await readGame(players.friend)).game;
     const removed = final.position.catEffects?.[1];
     expect(removed?.action).toBe("remove");
@@ -506,6 +985,10 @@ test("Catchess animates committed pawn actions in both orientations once and res
     });
     await expect(players.friend.locator(".cat-layer")).toHaveCount(0);
     expect(await players.friend.evaluate(() => Reflect.get(window, "catVisitAudit"))).toEqual([
+      "1",
+      "2",
+    ]);
+    expect(await players.host.evaluate(() => Reflect.get(window, "catVisitAudit"))).toEqual([
       "1",
       "2",
     ]);

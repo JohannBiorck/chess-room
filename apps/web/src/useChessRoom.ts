@@ -24,12 +24,14 @@ import {
   request,
 } from "./api";
 import { liveCatEffects as collectLiveCatEffects } from "./catPresentation";
+import { type PendingMove, previewMove } from "./movePreview";
 
 export type Invitation = { token: string; expiresAt: number };
 type SessionResponse = { session: SessionView | null };
 type CreatedGame = GameView & { invitation: Invitation };
 type PendingCommand = { gameId: string; command: GameCommand };
 type Connection = "connecting" | "connected" | "reconnecting";
+type Delivery = { isCurrent: () => boolean; isLive: () => boolean };
 
 function parseGame(payload: unknown): GameView {
   const candidate =
@@ -46,7 +48,10 @@ export function useChessRoom() {
   const [session, setSession] = useState<SessionView | null>(null);
   const [view, setView] = useState<GameView | null>(null);
   const [liveCatEffects, setLiveCatEffects] = useState<CatEffect[]>([]);
+  const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
   const viewRef = useRef<GameView | null>(null);
+  const connectionEpoch = useRef(0);
+  const subscribed = useRef(false);
   const [invitation, setInvitation] = useState<Invitation | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -73,15 +78,22 @@ export function useChessRoom() {
     else if (arrivals.length > 0)
       setLiveCatEffects((effects) => [...effects, ...arrivals].slice(-24));
     viewRef.current = next;
+    setPendingMove((pending) =>
+      pending && (pending.gameId !== next.game.id || next.game.revision > pending.revision)
+        ? null
+        : pending,
+    );
     setView(next);
     setReceivedAt(performance.now());
     rememberGame(next.game.id);
   }, []);
 
   const refreshGame = useCallback(
-    async (gameId: string, follow = false) => {
+    async (gameId: string, follow = false, delivery?: Delivery) => {
       const next = parseGame(await request<GameView>(`/api/games/${gameId}`));
-      if (follow || viewRef.current?.game.id === gameId) applyView(next);
+      if (delivery && !delivery.isCurrent()) return next;
+      if (follow || viewRef.current?.game.id === gameId)
+        applyView(next, delivery?.isLive() ?? false);
       return next;
     },
     [applyView],
@@ -132,13 +144,17 @@ export function useChessRoom() {
   useEffect(() => {
     if (!gameId) return;
     let alive = true;
+    subscribed.current = false;
+    connectionEpoch.current += 1;
     setConnection("connecting");
     const socket = io({ transports: ["websocket"], autoConnect: true });
     const subscribe = () => {
+      const epoch = ++connectionEpoch.current;
+      subscribed.current = false;
       socket
         .timeout(10_000)
         .emit("game:subscribe", { gameId }, (failure: unknown, payload: unknown) => {
-          if (!alive) return;
+          if (!alive || epoch !== connectionEpoch.current) return;
           if (failure) {
             setConnection("reconnecting");
             return;
@@ -158,6 +174,7 @@ export function useChessRoom() {
           }
           try {
             applyView(parseGame(payload));
+            subscribed.current = true;
             setConnection("connected");
           } catch (cause) {
             setError(errorMessage(cause));
@@ -166,6 +183,8 @@ export function useChessRoom() {
     };
     socket.on("connect", subscribe);
     socket.on("disconnect", () => {
+      connectionEpoch.current += 1;
+      subscribed.current = false;
       if (alive) setConnection("reconnecting");
     });
     socket.on("connect_error", () => {
@@ -181,13 +200,22 @@ export function useChessRoom() {
     });
     // A snapshot also corrects clocks and recovers a missed broadcast without trusting socket recovery.
     const synchronize = () => {
-      void refreshGame(gameId)
+      const epoch = connectionEpoch.current;
+      const live = subscribed.current && socket.connected;
+      // A connected refresh is another live delivery path. Treating it as history can
+      // consume a new cat effect just before the same socket revision arrives.
+      void refreshGame(gameId, false, {
+        isCurrent: () => alive && epoch === connectionEpoch.current,
+        isLive: () => live && subscribed.current && socket.connected,
+      })
         .then(() => {
-          if (alive && socket.connected) setConnection("connected");
+          if (alive && subscribed.current && socket.connected && epoch === connectionEpoch.current)
+            setConnection("connected");
         })
         .catch((cause: unknown) => {
-          if (alive) setConnection("reconnecting");
-          if (alive && cause instanceof ApiError && cause.status === 401) {
+          if (!alive || epoch !== connectionEpoch.current) return;
+          setConnection("reconnecting");
+          if (cause instanceof ApiError && cause.status === 401) {
             setSession(null);
             rememberGame(null);
             setNotice(
@@ -205,6 +233,8 @@ export function useChessRoom() {
     document.addEventListener("visibilitychange", foreground);
     return () => {
       alive = false;
+      subscribed.current = false;
+      connectionEpoch.current += 1;
       window.clearInterval(poll);
       document.removeEventListener("visibilitychange", foreground);
       socket.disconnect();
@@ -266,13 +296,41 @@ export function useChessRoom() {
 
   async function execute(pending: PendingCommand) {
     setRetry(null);
+    const current = viewRef.current;
+    const epoch = connectionEpoch.current;
+    const live = subscribed.current;
+    if (
+      pending.command.action.type === "move" &&
+      current?.game.id === pending.gameId &&
+      current.game.revision === pending.command.expectedRevision &&
+      current.game.phase === "active" &&
+      current.seat === current.game.position.turn &&
+      connection === "connected"
+    ) {
+      const board = previewMove(
+        current.game.position.board,
+        current.game.position.legalMoves,
+        pending.command.action,
+      );
+      if (board)
+        setPendingMove({
+          gameId: pending.gameId,
+          revision: current.game.revision,
+          move: pending.command.action,
+          board,
+        });
+    }
     try {
       const payload = await request<GameView>(
         `/api/games/${pending.gameId}/commands`,
         pending.command,
       );
       applyView(parseGame(payload), true);
+      setPendingMove(null);
     } catch (cause) {
+      // Roll back only the visual preview; an independently confirmed socket update
+      // remains authoritative even when its HTTP acknowledgement was lost.
+      setPendingMove(null);
       if (cause instanceof ApiError && (cause.status === 0 || cause.status >= 500)) {
         setRetry(pending);
         setNotice(
@@ -280,7 +338,10 @@ export function useChessRoom() {
         );
       }
       try {
-        await refreshGame(pending.gameId);
+        await refreshGame(pending.gameId, false, {
+          isCurrent: () => epoch === connectionEpoch.current,
+          isLive: () => live && subscribed.current,
+        });
       } catch {
         /* The connection error above remains actionable. */
       }
@@ -341,6 +402,7 @@ export function useChessRoom() {
   function lobby() {
     viewRef.current = null;
     setView(null);
+    setPendingMove(null);
     setLiveCatEffects([]);
     setInvitation(null);
     setRetry(null);
@@ -353,6 +415,7 @@ export function useChessRoom() {
     session,
     view,
     liveCatEffects,
+    pendingMove,
     invitation,
     loading,
     busy,

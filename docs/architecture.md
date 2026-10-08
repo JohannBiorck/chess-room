@@ -37,7 +37,7 @@ snapshots additionally carry the signed settings and one cat effect per move.
 3. Find an existing receipt before checking the expected revision.
 4. Adjudicate any expired clock, check revision and apply the action.
 5. Commit state, action/result event, revision, receipt and outbox together.
-6. Acknowledge the committed projection.
+6. Publish the committed projection to authorized local sockets and acknowledge it.
 
 Accepted retries return their original acknowledgement. Reusing a UUID with
 different data fails. Rejected commands do not consume the UUID. Clients ignore
@@ -50,10 +50,25 @@ receipt, authorization, revision and turn checks. Its move, cat effect and
 receipt commit atomically. Clients cannot choose the draw or a target square;
 they animate the committed effect received in the public snapshot.
 
+A legal move updates the acting player's board immediately using the server's
+current legal destinations. This temporary display handles captures, castling,
+en passant and promotion; it does not predict random effects, history, clocks,
+turn changes or outcomes. Further input waits for confirmation. A newer
+committed revision replaces the preview, and rejection restores the confirmed
+board. A lost HTTP acknowledgement cannot undo a socket-confirmed move.
+
+Both players animate newly committed cat effects from live socket updates,
+command acknowledgements or connected recovery refreshes. Revision and ply
+checks prevent repeats when those paths race. Initial and reconnect snapshots
+restore history without replaying old visits; reduced motion remains respected.
+
 ## Multiple instances and recovery
 
 Socket.IO uses WebSocket transport only. A subscription validates guest expiry
-and membership and returns a complete snapshot. Each process checks its
+and membership and returns a complete snapshot. Accepted HTTP commands and
+joins immediately publish their committed projection to local subscribers,
+without an extra database read. A shared revision guard prevents retries or
+slower polling projections from delivering an older update. Each process checks its
 subscribed games' durable revisions every 250 milliseconds and broadcasts
 newer committed projections. Reconnection resubscribes and replaces the
 snapshot, so missed individual broadcasts cannot lose an accepted move.
@@ -65,7 +80,7 @@ worker cycle at a time. This preserves timeout processing without querying
 an unused serverless database four times per second.
 
 The outbox is drained in bounded batches after commit. Revision polling is the
-shared fanout and recovery source. Outbox completion does not prove a browser
+cross-instance fanout and recovery source. Outbox completion does not prove a browser
 received a message. PostgreSQL holds shared request counters and match locks.
 Redis is not required at the measured scale. WebSocket-only transport avoids
 polling's sticky-session requirement but requires WebSocket support.

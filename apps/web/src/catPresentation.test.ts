@@ -70,4 +70,19 @@ describe("Catchess presentation", () => {
       effects[0],
     ]);
   });
+
+  it("queues both players' applied cat actions in move order", () => {
+    const bothPlayers: CatEffect[] = [
+      { ply: 1, color: "white", action: "add", square: "c3" },
+      { ply: 2, color: "black", action: "add", square: "f6" },
+      { ply: 3, color: "white", action: "remove", square: "a2" },
+      { ply: 4, color: "black", action: "remove", square: "h7" },
+    ];
+    expect(
+      liveCatEffects({ id: "room", ply: 0 }, { id: "room", ply: 4 }, bothPlayers, true),
+    ).toEqual(bothPlayers);
+    expect(
+      liveCatEffects({ id: "room", ply: 2 }, { id: "room", ply: 4 }, bothPlayers, true),
+    ).toEqual(bothPlayers.slice(2));
+  });
 });

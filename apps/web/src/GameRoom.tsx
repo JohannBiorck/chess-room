@@ -17,6 +17,7 @@ import { Clock } from "./Clock";
 import { catChanceLabel, catEffectDescription } from "./catPresentation";
 import { CopyIcon, FlipIcon, LinkIcon } from "./Icons";
 import { Modal } from "./Modal";
+import type { PendingMove } from "./movePreview";
 import { Piece, pieceNames } from "./Piece";
 import type { Invitation } from "./useChessRoom";
 
@@ -40,6 +41,7 @@ const reasonLabels: Record<GameOutcome["reason"], string> = {
 type GameRoomProps = {
   view: GameView;
   liveCatEffects: CatEffect[];
+  pendingMove: PendingMove | null;
   invitation: Invitation | null;
   receivedAt: number;
   busy: boolean;
@@ -54,6 +56,7 @@ type GameRoomProps = {
 export function GameRoom({
   view,
   liveCatEffects,
+  pendingMove,
   invitation,
   receivedAt,
   busy,
@@ -111,7 +114,10 @@ export function GameRoom({
   const ownRematch = seat !== null && game.rematchRequested.includes(seat);
   const incomingRematch = game.rematchRequested.includes(opponent);
   const invitationExpired = invitation !== null && invitation.expiresAt <= now;
+  const preview =
+    pendingMove?.gameId === game.id && pendingMove.revision === game.revision ? pendingMove : null;
   const lastMove = game.position.moves.at(-1);
+  const boardLastMove = preview?.move ?? lastMove;
   const effectsByPly = new Map(
     (game.position.catEffects ?? []).map((effect) => [effect.ply, effect]),
   );
@@ -121,9 +127,11 @@ export function GameRoom({
       : "Game drawn"
     : game.phase === "waiting"
       ? "Waiting for your friend"
-      : yourTurn
-        ? "Your move"
-        : `${game.players[game.position.turn]?.displayName ?? "Your friend"}’s move`;
+      : preview
+        ? "Confirming your move…"
+        : yourTurn
+          ? "Your move"
+          : `${game.players[game.position.turn]?.displayName ?? "Your friend"}’s move`;
 
   function move(candidates: MoveInput[]) {
     if (candidates.some((candidate) => candidate.promotion !== undefined)) setPromotion(candidates);
@@ -216,17 +224,17 @@ export function GameRoom({
           <Board
             gameId={game.id}
             catEffects={liveCatEffects}
-            latestPly={game.position.moves.length}
-            board={game.position.board}
+            latestPly={game.position.moves.length + (preview ? 1 : 0)}
+            board={preview?.board ?? game.position.board}
             legalMoves={game.position.legalMoves}
             orientation={orientation}
             seat={seat}
             turn={game.position.turn}
-            inCheck={game.position.inCheck}
+            inCheck={!preview && game.position.inCheck}
             canMove={canMove}
             busy={busy}
             revision={game.revision}
-            {...(lastMove ? { lastMove } : {})}
+            {...(boardLastMove ? { lastMove: boardLastMove } : {})}
             onMove={move}
           />
           {player(orientation)}
@@ -264,11 +272,13 @@ export function GameRoom({
               <p>Send your invitation. The game starts as soon as the other seat is taken.</p>
             ) : (
               <p>
-                {game.position.inCheck
-                  ? `${game.position.turn === "white" ? "White" : "Black"} is in check. Protect the king.`
-                  : yourTurn
-                    ? "Select one of your pieces to see its legal moves."
-                    : "Take a moment. Your friend is thinking."}
+                {preview
+                  ? "Your piece has moved. Waiting for confirmation."
+                  : game.position.inCheck
+                    ? `${game.position.turn === "white" ? "White" : "Black"} is in check. Protect the king.`
+                    : yourTurn
+                      ? "Select one of your pieces to see its legal moves."
+                      : "Take a moment. Your friend is thinking."}
               </p>
             )}
             {game.rulesetId === "three-check" && (
