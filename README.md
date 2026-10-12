@@ -1,8 +1,14 @@
 # Chess Room
 
-Play chess with a friend in a private browser room. Choose Standard chess,
-Three-check or Catchess, share an invitation, and play with display names
-without accounts.
+Play chess in your browser. Choose Standard chess, Three-check or Catchess,
+then create a private invitation room or an open room that other visitors
+can join. Players use display names without accounts.
+
+Use the name button in the header to change your display name in the lobby
+or during a game. Your browser session and seat stay the same. Open rooms
+show the host's name, game mode, clock and cat settings on the home page;
+the first visitor to join takes the available seat. Private rooms are the
+default and never appear in that list.
 
 In Catchess, each player has their own cat. Adjust each cat's slider in the
 lobby: a positive percentage can add a pawn on that player's half of the board;
@@ -41,6 +47,8 @@ npm run dev
 
 Open [Chess Room locally](http://127.0.0.1:5173). Create a room and open its
 invitation in another browser or an incognito window for the second player.
+Alternatively, create an open room and join it from the second browser's
+home page.
 Development binds to localhost. A link containing 127.0.0.1 works only on the
 same computer; internet play needs an HTTPS host and WebSocket routing.
 See [operations](docs/operations.md) for configuration and
@@ -114,6 +122,6 @@ idempotent. Curated rules adapters remain independent of sessions, transport
 and storage. See [architecture](docs/architecture.md),
 [operations](docs/operations.md), and [measured performance](docs/performance.md).
 
-Current scope excludes accounts, matchmaking, ratings, spectators, chat and
+Current scope excludes accounts, automatic matchmaking, ratings, spectators, chat and
 executable custom scripts. No project license has been selected. See
 [dependency notices](THIRD_PARTY_NOTICES.md).

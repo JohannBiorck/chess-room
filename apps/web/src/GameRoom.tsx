@@ -105,6 +105,7 @@ export function GameRoom({
 
   const rule = RULESETS.find((entry) => entry.id === game.rulesetId);
   const active = game.phase === "active";
+  const openRoom = game.visibility === "open";
   const finished = game.phase === "finished";
   const yourTurn = active && seat === game.position.turn;
   const canMove = yourTurn && !busy && connection === "connected";
@@ -126,7 +127,9 @@ export function GameRoom({
       ? `${game.players[game.outcome.winner]?.displayName ?? game.outcome.winner} wins`
       : "Game drawn"
     : game.phase === "waiting"
-      ? "Waiting for your friend"
+      ? openRoom
+        ? "Waiting for an opponent"
+        : "Waiting for your friend"
       : preview
         ? "Confirming your move…"
         : yourTurn
@@ -169,7 +172,7 @@ export function GameRoom({
             </strong>
             <span className="player-subtitle">
               {color === "white" ? "White pieces" : "Black pieces"}
-              {!participant && " · Invite a friend"}
+              {!participant && (openRoom ? " · Anyone can join" : " · Invite a friend")}
             </span>
           </div>
         </div>
@@ -182,7 +185,7 @@ export function GameRoom({
     <main id="main" tabIndex={-1} className="game-room">
       <div className="game-heading">
         <div>
-          <p className="eyebrow">YOUR PRIVATE TABLE</p>
+          <p className="eyebrow">{openRoom ? "YOUR OPEN TABLE" : "YOUR PRIVATE TABLE"}</p>
           <h1>{rule?.label ?? "Chess"}</h1>
         </div>
         <div className="game-heading-actions">
@@ -269,7 +272,11 @@ export function GameRoom({
             {finished && game.outcome ? (
               <p>{reasonLabels[game.outcome.reason]}</p>
             ) : game.phase === "waiting" ? (
-              <p>Send your invitation. The game starts as soon as the other seat is taken.</p>
+              <p>
+                {openRoom
+                  ? "Your room is listed in the open lobby. Anyone visiting the site can join. The game starts when the other seat is taken."
+                  : "Send your invitation. The game starts as soon as the other seat is taken."}
+              </p>
             ) : (
               <p>
                 {preview
@@ -278,7 +285,9 @@ export function GameRoom({
                     ? `${game.position.turn === "white" ? "White" : "Black"} is in check. Protect the king.`
                     : yourTurn
                       ? "Select one of your pieces to see its legal moves."
-                      : "Take a moment. Your friend is thinking."}
+                      : openRoom
+                        ? "Take a moment. Your opponent is thinking."
+                        : "Take a moment. Your friend is thinking."}
               </p>
             )}
             {game.rulesetId === "three-check" && (
@@ -319,7 +328,7 @@ export function GameRoom({
               </p>
             </fieldset>
           )}
-          {game.phase === "waiting" && (
+          {game.phase === "waiting" && !openRoom && (
             <section className="invite-panel" aria-labelledby="invite-heading">
               <h3 id="invite-heading">
                 <LinkIcon /> Invite your friend

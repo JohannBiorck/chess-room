@@ -81,7 +81,10 @@ describe.skipIf(!connectionString)("PostgreSQL durable storage", () => {
     const first = migrations[0];
     if (!first) throw new Error("Initial migration is missing.");
     await expect(
-      migrate(database.pool, [{ ...first, sql: `${first.sql}\n-- altered migration` }]),
+      migrate(database.pool, [
+        { ...first, sql: `${first.sql}\n-- altered migration` },
+        ...migrations.slice(1),
+      ]),
     ).rejects.toThrow("Applied migration was changed");
   });
 
@@ -91,7 +94,7 @@ describe.skipIf(!connectionString)("PostgreSQL durable storage", () => {
       migrate(database.pool, [
         ...migrations,
         {
-          name: "002_failed.sql",
+          name: "003_failed.sql",
           sql: "CREATE TABLE should_rollback (id integer); SELECT * FROM missing_table;",
         },
       ]),

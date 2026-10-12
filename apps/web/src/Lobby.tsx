@@ -1,14 +1,16 @@
 import {
   type CatchessSettings as CatSettings,
   type CreateGame,
+  type OpenRoom,
   RULESETS,
   type SessionView,
   TIME_CONTROLS,
 } from "@chess-room/contracts";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Cat } from "./Cat";
 import { CatchessSettings } from "./CatchessSettings";
 import { ArrowIcon, LinkIcon, ShieldIcon } from "./Icons";
+import { OpenRooms } from "./OpenRooms";
 import { Piece, type PieceKind } from "./Piece";
 
 type LobbyProps = {
@@ -19,6 +21,11 @@ type LobbyProps = {
   onResume: () => Promise<void>;
   onCreate: (name: string, settings: CreateGame) => Promise<void>;
   onJoin: (name: string, invitation: string) => Promise<void>;
+  openRooms: OpenRoom[];
+  roomsLoading: boolean;
+  roomsError: string | null;
+  onRefreshRooms: () => Promise<void>;
+  onJoinOpen: (name: string, roomId: string) => Promise<void>;
 };
 
 function TableIllustration() {
@@ -60,6 +67,11 @@ export function Lobby({
   onResume,
   onCreate,
   onJoin,
+  openRooms,
+  roomsLoading,
+  roomsError,
+  onRefreshRooms,
+  onJoinOpen,
 }: LobbyProps) {
   const [displayName, setDisplayName] = useState(session?.displayName ?? "");
   const [settings, setSettings] = useState<CreateGame>({
@@ -71,6 +83,11 @@ export function Lobby({
   const [invite, setInvite] = useState(initialInvitation);
   const [tab, setTab] = useState<"create" | "join">(initialInvitation ? "join" : "create");
   const rules = RULESETS.find((entry) => entry.id === settings.rulesetId);
+  const isOpen = settings.visibility === "open";
+
+  useEffect(() => {
+    if (session?.displayName) setDisplayName(session.displayName);
+  }, [session?.displayName]);
 
   return (
     <main id="main" tabIndex={-1} className="lobby">
@@ -85,12 +102,12 @@ export function Lobby({
             Great chess.
           </h1>
           <p className="introduction">
-            A private board for you and a friend. Share a link, take your seats, and make your next
-            move.
+            A board for good company. Invite a friend or join an open room, take your seats, and
+            make your next move.
           </p>
           <div className="hero-details">
             <span>
-              <LinkIcon /> Invitation links
+              <LinkIcon /> Private links & open rooms
             </span>
             <span>
               <ShieldIcon /> No account needed
@@ -99,6 +116,18 @@ export function Lobby({
         </div>
         <TableIllustration />
       </section>
+
+      <OpenRooms
+        rooms={openRooms}
+        loading={roomsLoading}
+        error={roomsError}
+        busy={busy}
+        displayName={displayName}
+        hasSession={session !== null}
+        onDisplayName={setDisplayName}
+        onRefresh={onRefreshRooms}
+        onJoin={onJoinOpen}
+      />
 
       <section className="lobby-controls" aria-labelledby="room-heading">
         <div className="room-description">
@@ -118,8 +147,8 @@ export function Lobby({
           <div className="small-rule">
             <span>02</span>
             <div>
-              <h3>Invite your friend</h3>
-              <p>One private link. Two players.</p>
+              <h3>Welcome an opponent</h3>
+              <p>Share a private link or open the other seat.</p>
             </div>
           </div>
           <div className="small-rule">
@@ -166,46 +195,80 @@ export function Lobby({
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              if (tab === "create")
-                void onCreate(
-                  displayName.trim(),
-                  settings.rulesetId === "catchess"
-                    ? { ...settings, catchess: catSettings }
-                    : settings,
-                );
-              else void onJoin(displayName.trim(), invite);
+              if (tab === "create") {
+                const { visibility, ...config } = settings;
+                void onCreate(displayName.trim(), {
+                  ...config,
+                  ...(visibility === "open" ? { visibility } : {}),
+                  ...(settings.rulesetId === "catchess" ? { catchess: catSettings } : {}),
+                });
+              } else void onJoin(displayName.trim(), invite);
             }}
           >
-            {session ? (
-              <div className="guest-identity">
-                <span className="avatar">{session.displayName.slice(0, 1).toUpperCase()}</span>
-                <div>
-                  <span className="field-label">PLAYING AS</span>
-                  <strong>{session.displayName}</strong>
-                </div>
-                <span className="guest-badge">Guest</span>
-              </div>
-            ) : (
-              <div className="form-field">
-                <label htmlFor="display-name">Your display name</label>
-                <input
-                  id="display-name"
-                  name="displayName"
-                  placeholder="What should your friend call you?"
-                  autoComplete="nickname"
-                  maxLength={32}
-                  required
-                  value={displayName}
-                  onChange={(event) => setDisplayName(event.target.value)}
-                  disabled={busy}
-                />
-                <span className="field-hint">
-                  Your guest seat stays in this browser. Keep its cookies to return.
-                </span>
-              </div>
-            )}
+            <div className="form-field">
+              <label htmlFor="display-name">Your display name</label>
+              <input
+                id="display-name"
+                name="displayName"
+                placeholder="What should we call you?"
+                autoComplete="nickname"
+                maxLength={32}
+                required
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+                disabled={busy}
+                aria-describedby="guest-name-hint"
+              />
+              <span className="field-hint" id="guest-name-hint">
+                {session
+                  ? "Edit your name for your next room, or use your name in the header to change it now."
+                  : "Your guest seat stays in this browser. Keep its cookies to return."}
+              </span>
+            </div>
             {tab === "create" ? (
               <>
+                <fieldset className="visibility-field" aria-describedby="visibility-hint">
+                  <legend>Who can join?</legend>
+                  <div className="visibility-options">
+                    <label
+                      className={
+                        !isOpen
+                          ? "visibility-option visibility-option--selected"
+                          : "visibility-option"
+                      }
+                    >
+                      <input
+                        type="radio"
+                        name="visibility"
+                        checked={!isOpen}
+                        onChange={() => setSettings({ ...settings, visibility: "private" })}
+                        disabled={busy}
+                      />
+                      <span>Private invitation</span>
+                    </label>
+                    <label
+                      className={
+                        isOpen
+                          ? "visibility-option visibility-option--selected"
+                          : "visibility-option"
+                      }
+                    >
+                      <input
+                        type="radio"
+                        name="visibility"
+                        checked={isOpen}
+                        onChange={() => setSettings({ ...settings, visibility: "open" })}
+                        disabled={busy}
+                      />
+                      <span>Open lobby</span>
+                    </label>
+                  </div>
+                  <p className="field-hint" id="visibility-hint">
+                    {isOpen
+                      ? "Your display name and game settings will be listed publicly. Anyone visiting the site can take the open seat."
+                      : "Your room stays unlisted. Only someone with your invitation can take the other seat."}
+                  </p>
+                </fieldset>
                 <fieldset className="mode-field">
                   <legend>Game mode</legend>
                   <div className="mode-options">
@@ -296,11 +359,17 @@ export function Lobby({
                   className="button button--primary button--wide"
                   disabled={busy}
                 >
-                  {busy ? "Creating your room…" : "Create private room"}
+                  {busy
+                    ? "Creating your room…"
+                    : isOpen
+                      ? "Create open room"
+                      : "Create private room"}
                   <ArrowIcon />
                 </button>
                 <p className="form-note">
-                  Only someone with your invitation can take the other seat.
+                  {isOpen
+                    ? "The first player to join takes the seat. Your room appears on the home page."
+                    : "Only someone with your invitation can take the other seat."}
                 </p>
               </>
             ) : (

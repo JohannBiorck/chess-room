@@ -184,6 +184,27 @@ export class Transaction {
     return row.current_time.getTime();
   }
 
+  async renameSession(
+    id: string,
+    tokenHash: string,
+    displayName: string,
+  ): Promise<SessionRecord | null> {
+    const locked = await this.client.query<SessionRow>(
+      "SELECT * FROM player_sessions WHERE id=$1 AND token_hash=$2 FOR UPDATE",
+      [id, tokenHash],
+    );
+    const current = locked.rows[0];
+    // An UPDATE predicate may be evaluated before waiting for an unchanged row
+    // lock. Read the expiry after acquiring the lock so waiting cannot revive it.
+    if (!current || current.expires_at.getTime() <= (await this.databaseNow())) return null;
+    const result = await this.client.query<SessionRow>(
+      `UPDATE player_sessions SET display_name=$3
+       WHERE id=$1 AND token_hash=$2 AND expires_at>clock_timestamp() RETURNING *`,
+      [id, tokenHash, displayName],
+    );
+    return result.rows[0] ? sessionRecord(result.rows[0]) : null;
+  }
+
   async getSession(tokenHash: string): Promise<SessionRecord | null> {
     const result = await this.client.query<SessionRow>(
       "SELECT * FROM player_sessions WHERE token_hash = $1 AND expires_at > clock_timestamp()",

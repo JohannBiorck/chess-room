@@ -4,7 +4,9 @@ import {
   gameCommandSchema,
   guestSessionSchema,
   joinInvitationSchema,
+  openRoomsSchema,
   type PublicGame,
+  playerUpdateSchema,
 } from "@chess-room/contracts";
 import cookie from "@fastify/cookie";
 import staticFiles from "@fastify/static";
@@ -23,6 +25,7 @@ import { rateLimit } from "./rate-limit.js";
 
 const idSchema = z.uuid();
 const subscriptionSchema = z.object({ gameId: idSchema }).strict();
+const emptyBodySchema = z.object({}).strict();
 
 export async function buildApplication(options: {
   database: Database;
@@ -71,7 +74,12 @@ export async function buildApplication(options: {
     const route = request.routeOptions.url;
     if (
       request.method === "POST" &&
-      ["/api/games", "/api/invitations/join", "/api/games/:id/commands"].includes(route ?? "") &&
+      [
+        "/api/games",
+        "/api/invitations/join",
+        "/api/lobbies/:id/join",
+        "/api/games/:id/commands",
+      ].includes(route ?? "") &&
       (reply.statusCode < 400 || reply.statusCode === 409)
     ) {
       scheduler?.wake();
@@ -138,6 +146,37 @@ export async function buildApplication(options: {
       maxAge: SESSION_LIFETIME / 1000,
     });
     return { session: service.sessionView(created.session) };
+  });
+  server.post("/api/session/name", { bodyLimit: 16_384 }, async (request) => {
+    const session = await actor(request);
+    const input = guestSessionSchema.parse(request.body);
+    await rateLimit(database, `rename:${session.id}`, 20);
+    const renamed = await service.rename(session, input.displayName);
+    const ids = subscribedIds();
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      const batch = ids.slice(offset, offset + 100);
+      const generations = new Map(batch.map((id) => [id, profileGenerations.get(id) ?? 0]));
+      for (const profile of await service.profiles(batch, session.id)) {
+        if (
+          (profileGenerations.get(profile.gameId) ?? 0) === generations.get(profile.gameId) &&
+          profile.revision >= (revisions.get(profile.gameId) ?? profile.revision)
+        )
+          publishPlayers(profile.gameId, profile.players);
+      }
+    }
+    return { session: service.sessionView(renamed) };
+  });
+  server.get("/api/lobbies", async (request) => {
+    await rateLimit(database, `lobbies:${request.ip}`, 60);
+    return openRoomsSchema.parse({ rooms: await service.openRooms() });
+  });
+  server.post("/api/lobbies/:id/join", { bodyLimit: 16_384 }, async (request) => {
+    const session = await actor(request);
+    emptyBodySchema.parse(request.body);
+    await rateLimit(database, `join:${session.id}`, 20);
+    const view = await service.joinOpen(session, gameId(request));
+    publish(view.game);
+    return view;
   });
   server.post("/api/games", { bodyLimit: 16_384 }, async (request, reply) => {
     const session = await actor(request);
@@ -215,6 +254,18 @@ export async function buildApplication(options: {
     }
   });
   const revisions = new Map<string, number>();
+  const profiles = new Map<string, string>();
+  const profileGenerations = new Map<string, number>();
+  const subscribedIds = () =>
+    [...revisions.keys()].filter((id) => io.sockets.adapter.rooms.has(`game:${id}`));
+  const publishPlayers = (id: string, players: PublicGame["players"]) => {
+    const payload = playerUpdateSchema.parse({ gameId: id, players });
+    const signature = JSON.stringify(payload.players);
+    if (profiles.get(id) === signature || !io.sockets.adapter.rooms.has(`game:${id}`)) return;
+    profiles.set(id, signature);
+    profileGenerations.set(id, (profileGenerations.get(id) ?? 0) + 1);
+    io.to(`game:${id}`).emit("game:players", payload);
+  };
   const publish = (game: PublicGame) => {
     const previous = revisions.get(game.id);
     if (
@@ -246,9 +297,21 @@ export async function buildApplication(options: {
         );
         if (!refreshed)
           throw new ApplicationError("SESSION_REQUIRED", "Your guest session expired.", 401);
+        const profileGeneration = profileGenerations.get(id) ?? 0;
         const view = await service.view(refreshed, id);
         for (const room of socket.rooms) if (room.startsWith("game:")) await socket.leave(room);
         await socket.join(`game:${id}`);
+        const previousRevision = revisions.get(id);
+        if (
+          (profileGenerations.get(id) ?? 0) === profileGeneration &&
+          view.game.revision >= (previousRevision ?? view.game.revision)
+        ) {
+          if (!profiles.has(id)) profiles.set(id, JSON.stringify(view.game.players));
+          else publishPlayers(id, view.game.players);
+        }
+        // An authoritative subscription snapshot also supersedes profile polls
+        // begun before it, even when its names have not changed locally.
+        profileGenerations.set(id, (profileGenerations.get(id) ?? 0) + 1);
         revisions.set(id, Math.min(revisions.get(id) ?? view.game.revision, view.game.revision));
         acknowledge(view);
         scheduler?.wake();
@@ -284,18 +347,27 @@ export async function buildApplication(options: {
         for (const event of await tx.claimOutbox(100))
           await tx.completeOutbox(event.id, event.leaseToken);
       });
-      for (const [id, previous] of revisions) {
+      for (const id of revisions.keys()) {
         if (!io.sockets.adapter.rooms.has(`game:${id}`)) {
           revisions.delete(id);
-          continue;
+          profiles.delete(id);
+          profileGenerations.delete(id);
         }
-        const current = await database.pool.query<{ revision: number }>(
-          "SELECT revision FROM matches WHERE id=$1",
-          [id],
-        );
-        if ((current.rows[0]?.revision ?? -1) > previous) {
-          const game = await service.publicView(id);
-          if (game) publish(game);
+      }
+      const ids = subscribedIds();
+      for (let offset = 0; offset < ids.length; offset += 100) {
+        const batch = ids.slice(offset, offset + 100);
+        const generations = new Map(batch.map((id) => [id, profileGenerations.get(id) ?? 0]));
+        for (const current of await service.profiles(batch)) {
+          if (
+            (profileGenerations.get(current.gameId) ?? 0) === generations.get(current.gameId) &&
+            current.revision >= (revisions.get(current.gameId) ?? current.revision)
+          )
+            publishPlayers(current.gameId, current.players);
+          if (current.revision > (revisions.get(current.gameId) ?? current.revision)) {
+            const game = await service.publicView(current.gameId);
+            if (game) publish(game);
+          }
         }
       }
     })().finally(() => {

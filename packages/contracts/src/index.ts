@@ -2,12 +2,14 @@ import { z } from "zod";
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_GAME_PLIES = 1200;
+export const MAX_OPEN_ROOMS = 50;
 
 export const rulesetIdSchema = z.enum(["standard", "three-check", "catchess"]);
 export const colorSchema = z.enum(["white", "black"]);
 export const squareSchema = z.string().regex(/^[a-h][1-8]$/);
 export const promotionSchema = z.enum(["q", "r", "b", "n"]);
 export const timeControlSchema = z.enum(["untimed", "5+0", "10+5", "15+10"]);
+export const roomVisibilitySchema = z.enum(["private", "open"]);
 export const displayNameSchema = z
   .string()
   .trim()
@@ -60,6 +62,7 @@ export const createGameSchema = z
     color: z.enum(["random", "white", "black"]).default("random"),
     timeControl: timeControlSchema.default("untimed"),
     catchess: catchessSettingsSchema.optional(),
+    visibility: roomVisibilitySchema.optional(),
   })
   .strict()
   .superRefine((config, context) => {
@@ -183,6 +186,9 @@ export const publicEnginePositionSchema = enginePositionSchema.extend({
   catEffects: z.array(catEffectSchema).max(MAX_GAME_PLIES).optional(),
 });
 const publicPlayerSchema = z.object({ displayName: displayNameSchema }).strict();
+export const publicPlayersSchema = z
+  .object({ white: publicPlayerSchema.nullable(), black: publicPlayerSchema.nullable() })
+  .strict();
 const timestampSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 export const publicClocksSchema = z
   .object({
@@ -201,10 +207,9 @@ export const publicGameSchema = z
     rulesetId: rulesetIdSchema,
     rulesVersion: z.literal(1),
     timeControl: timeControlSchema,
+    visibility: z.literal("open").optional(),
     catchess: catchessConfigSchema.nullable().optional(),
-    players: z
-      .object({ white: publicPlayerSchema.nullable(), black: publicPlayerSchema.nullable() })
-      .strict(),
+    players: publicPlayersSchema,
     position: publicEnginePositionSchema,
     clocks: publicClocksSchema.nullable(),
     outcome: gameOutcomeSchema.nullable(),
@@ -248,6 +253,29 @@ export const gameViewSchema = z
 export const sessionViewSchema = z
   .object({ displayName: displayNameSchema, expiresAt: timestampSchema })
   .strict();
+export const playerUpdateSchema = z
+  .object({ gameId: z.uuid(), players: publicPlayersSchema })
+  .strict();
+export const openRoomSchema = z
+  .object({
+    id: z.uuid(),
+    host: z.object({ displayName: displayNameSchema, color: colorSchema }).strict(),
+    rulesetId: rulesetIdSchema,
+    timeControl: timeControlSchema,
+    catchess: catchessConfigSchema.optional(),
+    createdAt: timestampSchema,
+    expiresAt: timestampSchema,
+  })
+  .strict()
+  .superRefine((room, context) => {
+    if ((room.rulesetId === "catchess") !== (room.catchess !== undefined))
+      context.addIssue({ code: "custom", message: "Cat settings are required only for Catchess." });
+    if (room.expiresAt <= room.createdAt)
+      context.addIssue({ code: "custom", message: "A room must expire after it was created." });
+  });
+export const openRoomsSchema = z
+  .object({ rooms: z.array(openRoomSchema).max(MAX_OPEN_ROOMS) })
+  .strict();
 
 export type RulesetId = z.infer<typeof rulesetIdSchema>;
 export type CatchessSettings = z.infer<typeof catchessSettingsSchema>;
@@ -270,3 +298,5 @@ export type PublicClocks = z.infer<typeof publicClocksSchema>;
 export type PublicGame = z.infer<typeof publicGameSchema>;
 export type GameView = z.infer<typeof gameViewSchema>;
 export type SessionView = z.infer<typeof sessionViewSchema>;
+export type OpenRoom = z.infer<typeof openRoomSchema>;
+export type PlayerUpdate = z.infer<typeof playerUpdateSchema>;

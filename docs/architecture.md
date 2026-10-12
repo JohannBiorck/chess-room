@@ -5,6 +5,10 @@ Standard chess, Three-check and Catchess share one match service. Browsers rende
 public state and submit actions; the server owns moves, revisions, clocks,
 random cat decisions and results.
 
+Rooms are private by default. Hosts can explicitly choose an open room for
+public discovery. Full game state remains available only to the two seated
+guests, including for open rooms.
+
 ## Boundaries
 
 | Module | Responsibility |
@@ -62,6 +66,26 @@ command acknowledgements or connected recovery refreshes. Revision and ply
 checks prevent repeats when those paths race. Initial and reconnect snapshots
 restore history without replaying old visits; reduced motion remains respected.
 
+Display names belong to guest profiles rather than match revisions. Renaming
+keeps the same authenticated session, expiry and seats. A separate validated
+`game:players` event updates names without changing the board or clock anchor.
+Clients preserve current names when old move receipts or in-flight snapshots
+arrive. Subscription snapshots and profile polling recover missed changes.
+
+`GET /api/lobbies` returns at most 50 waiting open rooms with a valid host,
+newest first. Summaries contain only the room ID, host name/color, mode, time
+control, cat settings and room expiry. Private rooms, invitations, session
+identifiers and boards are excluded. A partial index supports this query.
+The lobby refreshes every ten seconds while visible and also supports manual
+refresh; entering a game stops discovery polling.
+
+Public joins authenticate the guest and lock the match. They recheck room,
+host and guest expiry after capacity locks, fill the single available seat,
+consume outstanding invitations and start the clock in one transaction.
+Concurrent public and invitation joins therefore have one winner; retrying
+an accepted public join returns the same seat. Only open games add a visibility
+field to the existing public game message.
+
 ## Multiple instances and recovery
 
 Socket.IO uses WebSocket transport only. A subscription validates guest expiry
@@ -72,6 +96,11 @@ slower polling projections from delivering an older update. Each process checks 
 subscribed games' durable revisions every 250 milliseconds and broadcasts
 newer committed projections. Reconnection resubscribes and replaces the
 snapshot, so missed individual broadcasts cannot lose an accepted move.
+
+The same bounded polling batches also read player profiles and publish changed
+names across instances without replaying game history. Profile generations
+and match revisions prevent an older query from replacing a newer local name
+change or removing a newly joined player.
 
 Polling runs while a process has game subscribers. Otherwise an idle-aware
 scheduler waits for the nearest durable game deadline or hourly cleanup,
@@ -124,3 +153,6 @@ elevated or owning runtime roles, closes the owner pool, removes the migration
 URL from its process environment, and starts using the restricted application
 connection. The Render Blueprint disables automatic deployment and has no
 stored secrets. See [hosting](hosting.md).
+
+Migration `002_open_rooms.sql` adds only the waiting-open-room index. It does
+not rewrite games or alter the original migration.

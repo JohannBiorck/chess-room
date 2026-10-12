@@ -1,13 +1,17 @@
 import {
   type CatEffect,
   type CreateGame,
+  displayNameSchema,
   type GameAction,
   type GameCommand,
   type GameView,
   gameViewSchema,
   invitationTokenSchema,
+  type OpenRoom,
+  openRoomsSchema,
   PROTOCOL_VERSION,
   type PublicGame,
+  playerUpdateSchema,
   publicGameSchema,
   type SessionView,
   sessionViewSchema,
@@ -50,6 +54,7 @@ export function useChessRoom() {
   const [liveCatEffects, setLiveCatEffects] = useState<CatEffect[]>([]);
   const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
   const viewRef = useRef<GameView | null>(null);
+  const playersEpoch = useRef(0);
   const connectionEpoch = useRef(0);
   const subscribed = useRef(false);
   const [invitation, setInvitation] = useState<Invitation | null>(null);
@@ -61,13 +66,29 @@ export function useChessRoom() {
   const [connection, setConnection] = useState<Connection>("connecting");
   const [retry, setRetry] = useState<PendingCommand | null>(null);
   const [receivedAt, setReceivedAt] = useState(performance.now());
+  const [openRooms, setOpenRooms] = useState<OpenRoom[]>([]);
+  const [roomsLoading, setRoomsLoading] = useState(false);
+  const [roomsError, setRoomsError] = useState<string | null>(null);
+  const roomsRequest = useRef(0);
   const [initialInvitation] = useState(
     () => new URLSearchParams(window.location.hash.slice(1)).get("invite") ?? "",
   );
 
-  const applyView = useCallback((next: GameView, animate = false) => {
+  const applyView = useCallback((next: GameView, animate = false, preserveNames = false) => {
     const previous = viewRef.current;
     if (previous?.game.id === next.game.id && previous.game.revision > next.game.revision) return;
+    if (previous?.game.id !== next.game.id) playersEpoch.current += 1;
+    if (preserveNames && previous?.game.id === next.game.id)
+      next = {
+        ...next,
+        game: {
+          ...next.game,
+          players: {
+            white: previous.game.players.white ?? next.game.players.white,
+            black: previous.game.players.black ?? next.game.players.black,
+          },
+        },
+      };
     const arrivals = collectLiveCatEffects(
       previous ? { id: previous.game.id, ply: previous.game.position.moves.length } : null,
       { id: next.game.id, ply: next.game.position.moves.length },
@@ -84,20 +105,56 @@ export function useChessRoom() {
         : pending,
     );
     setView(next);
+    const own = next.seat ? next.game.players[next.seat] : null;
+    if (own)
+      setSession((current) => (current ? { ...current, displayName: own.displayName } : current));
     setReceivedAt(performance.now());
     rememberGame(next.game.id);
   }, []);
 
   const refreshGame = useCallback(
     async (gameId: string, follow = false, delivery?: Delivery) => {
+      const namesAtRequest = playersEpoch.current;
       const next = parseGame(await request<GameView>(`/api/games/${gameId}`));
       if (delivery && !delivery.isCurrent()) return next;
       if (follow || viewRef.current?.game.id === gameId)
-        applyView(next, delivery?.isLive() ?? false);
+        applyView(next, delivery?.isLive() ?? false, namesAtRequest !== playersEpoch.current);
       return next;
     },
     [applyView],
   );
+
+  const refreshOpenRooms = useCallback(async () => {
+    const requestId = ++roomsRequest.current;
+    setRoomsLoading(true);
+    try {
+      const result = openRoomsSchema.parse(await request<unknown>("/api/lobbies"));
+      if (requestId !== roomsRequest.current || viewRef.current) return;
+      setOpenRooms(result.rooms);
+      setRoomsError(null);
+    } catch (cause) {
+      if (requestId === roomsRequest.current && !viewRef.current)
+        setRoomsError(errorMessage(cause));
+    } finally {
+      if (requestId === roomsRequest.current) setRoomsLoading(false);
+    }
+  }, []);
+
+  const inLobby = view === null && !loading;
+  useEffect(() => {
+    if (!inLobby) return;
+    void refreshOpenRooms();
+    const refresh = () => {
+      if (document.visibilityState === "visible") void refreshOpenRooms();
+    };
+    const timer = window.setInterval(refresh, 10_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      roomsRequest.current += 1;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [inLobby, refreshOpenRooms]);
 
   useEffect(() => {
     let alive = true;
@@ -150,6 +207,7 @@ export function useChessRoom() {
     const socket = io({ transports: ["websocket"], autoConnect: true });
     const subscribe = () => {
       const epoch = ++connectionEpoch.current;
+      const namesAtRequest = playersEpoch.current;
       subscribed.current = false;
       socket
         .timeout(10_000)
@@ -173,7 +231,7 @@ export function useChessRoom() {
             }
           }
           try {
-            applyView(parseGame(payload));
+            applyView(parseGame(payload), false, namesAtRequest !== playersEpoch.current);
             subscribed.current = true;
             setConnection("connected");
           } catch (cause) {
@@ -196,7 +254,24 @@ export function useChessRoom() {
       if (!result.success || result.data.id !== gameId) return;
       const previous = viewRef.current;
       if (previous?.game.id === gameId && result.data.revision > previous.game.revision)
-        applyView({ game: result.data, seat: previous.seat }, true);
+        applyView({ game: result.data, seat: previous.seat }, true, true);
+    });
+    socket.on("game:players", (payload: unknown) => {
+      if (!alive) return;
+      const result = playerUpdateSchema.safeParse(payload);
+      const previous = viewRef.current;
+      if (!result.success || result.data.gameId !== gameId || previous?.game.id !== gameId) return;
+      playersEpoch.current += 1;
+      const players = {
+        white: result.data.players.white ?? previous.game.players.white,
+        black: result.data.players.black ?? previous.game.players.black,
+      };
+      const next = { ...previous, game: { ...previous.game, players } };
+      viewRef.current = next;
+      setView(next);
+      const own = previous.seat ? players[previous.seat] : null;
+      if (own)
+        setSession((current) => (current ? { ...current, displayName: own.displayName } : current));
     });
     // A snapshot also corrects clocks and recovers a missed broadcast without trusting socket recovery.
     const synchronize = () => {
@@ -242,19 +317,21 @@ export function useChessRoom() {
   }, [applyView, gameId, refreshGame]);
 
   async function operation(work: () => Promise<void>) {
-    if (busyRef.current) return;
+    if (busyRef.current) return false;
     busyRef.current = true;
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
       await work();
+      return true;
     } catch (cause) {
       setError(errorMessage(cause));
       if (cause instanceof ApiError && cause.status === 401) {
         setSession(null);
         rememberGame(null);
       }
+      return false;
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -262,11 +339,63 @@ export function useChessRoom() {
   }
 
   async function ensureSession(displayName: string) {
-    if (session) return;
-    const payload = await request<SessionResponse>("/api/session", { displayName });
+    const name = displayNameSchema.safeParse(displayName);
+    if (!name.success)
+      throw new Error("Use a display name of 1–32 characters without hidden control characters.");
+    if (session) {
+      if (session.displayName !== name.data) await saveName(name.data);
+      return;
+    }
+    const payload = await request<SessionResponse>("/api/session", { displayName: name.data });
     if (!payload.session)
       throw new Error("Your guest session could not be created. Please try again.");
     setSession(sessionViewSchema.parse(payload.session));
+  }
+
+  async function saveName(displayName: string) {
+    const name = displayNameSchema.safeParse(displayName);
+    if (!name.success)
+      throw new Error("Use a display name of 1–32 characters without hidden control characters.");
+    const payload = await request<SessionResponse>("/api/session/name", { displayName: name.data });
+    if (!payload.session)
+      throw new Error("Your display name could not be saved. Please try again.");
+    const next = sessionViewSchema.parse(payload.session);
+    setSession(next);
+    const current = viewRef.current;
+    if (current?.seat) {
+      playersEpoch.current += 1;
+      const updated = {
+        ...current,
+        game: {
+          ...current.game,
+          players: { ...current.game.players, [current.seat]: { displayName: next.displayName } },
+        },
+      };
+      viewRef.current = updated;
+      setView(updated);
+    }
+    if (!viewRef.current) void refreshOpenRooms();
+  }
+
+  async function rename(displayName: string) {
+    return operation(() => saveName(displayName));
+  }
+
+  async function joinOpen(displayName: string, roomId: string) {
+    await operation(async () => {
+      if (!/^[0-9a-f-]{36}$/i.test(roomId)) throw new Error("Choose an available open room.");
+      await ensureSession(displayName);
+      try {
+        const payload = await request<GameView>(`/api/lobbies/${roomId}/join`, {});
+        setInvitation(null);
+        setRetry(null);
+        applyView(parseGame(payload));
+        window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      } catch (cause) {
+        void refreshOpenRooms();
+        throw cause;
+      }
+    });
   }
 
   async function create(displayName: string, settings: CreateGame) {
@@ -325,7 +454,7 @@ export function useChessRoom() {
         `/api/games/${pending.gameId}/commands`,
         pending.command,
       );
-      applyView(parseGame(payload), true);
+      applyView(parseGame(payload), true, true);
       setPendingMove(null);
     } catch (cause) {
       // Roll back only the visual preview; an independently confirmed socket update
@@ -425,9 +554,15 @@ export function useChessRoom() {
     retry,
     receivedAt,
     initialInvitation,
+    openRooms,
+    roomsLoading,
+    roomsError,
     hasSavedGame: session !== null && currentGameId() !== null,
     create,
     join,
+    joinOpen,
+    rename,
+    refreshOpenRooms,
     command,
     retryCommand,
     reconnect,

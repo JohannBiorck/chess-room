@@ -7,6 +7,8 @@ import {
   guestSessionSchema,
   joinInvitationSchema,
   moveInputSchema,
+  openRoomsSchema,
+  playerUpdateSchema,
   publicClocksSchema,
   publicGameSchema,
 } from "./index.js";
@@ -19,6 +21,57 @@ const command = {
 };
 
 describe("guest and room boundaries", () => {
+  it("preserves default private creation and accepts only reviewed visibility values", () => {
+    expect(createGameSchema.parse({})).not.toHaveProperty("visibility");
+    expect(createGameSchema.parse({ visibility: "open" }).visibility).toBe("open");
+    expect(createGameSchema.safeParse({ visibility: "hidden" }).success).toBe(false);
+  });
+
+  it("bounds open discovery and forbids sensitive fields in room summaries", () => {
+    const room = {
+      id: "0fe54f10-65af-4c2f-b70d-925d0d1b73ab",
+      host: { displayName: "Ada", color: "black" },
+      rulesetId: "standard",
+      timeControl: "10+5",
+      createdAt: 1000,
+      expiresAt: 2000,
+    };
+    expect(openRoomsSchema.parse({ rooms: [room] }).rooms).toEqual([room]);
+    for (const field of ["token", "invitation", "sessionId", "board"])
+      expect(openRoomsSchema.safeParse({ rooms: [{ ...room, [field]: "secret" }] }).success).toBe(
+        false,
+      );
+    expect(
+      openRoomsSchema.safeParse({ rooms: Array.from({ length: 51 }, () => room) }).success,
+    ).toBe(false);
+    expect(openRoomsSchema.safeParse({ rooms: [{ ...room, expiresAt: 1000 }] }).success).toBe(
+      false,
+    );
+    expect(openRoomsSchema.safeParse({ rooms: [{ ...room, rulesetId: "catchess" }] }).success).toBe(
+      false,
+    );
+    expect(
+      openRoomsSchema.safeParse({
+        rooms: [{ ...room, rulesetId: "catchess", catchess: { white: -25, black: 70 } }],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("validates profile broadcasts without accepting identity or authoritative game fields", () => {
+    const update = {
+      gameId: "0fe54f10-65af-4c2f-b70d-925d0d1b73ab",
+      players: { white: { displayName: "Ada" }, black: null },
+    };
+    expect(playerUpdateSchema.parse(update)).toEqual(update);
+    expect(playerUpdateSchema.safeParse({ ...update, revision: 2 }).success).toBe(false);
+    expect(
+      playerUpdateSchema.safeParse({
+        ...update,
+        players: { white: { displayName: "Ada", sessionId: "secret" }, black: null },
+      }).success,
+    ).toBe(false);
+  });
+
   it("normalizes a display name and applies the smallest match defaults", () => {
     expect(guestSessionSchema.parse({ displayName: "  Ada  " })).toEqual({ displayName: "Ada" });
     expect(createGameSchema.parse({})).toEqual({

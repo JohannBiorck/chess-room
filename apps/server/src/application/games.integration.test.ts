@@ -5,6 +5,7 @@ import {
   type GameCommand,
   type GameView,
   gameViewSchema,
+  openRoomsSchema,
 } from "@chess-room/contracts";
 import { createEngineState, engineStateSchema } from "@chess-room/game-core";
 import { Pool } from "pg";
@@ -70,6 +71,339 @@ describe("durable game application", () => {
   async function act(view: GameView, actor: SessionRecord, action: GameAction): Promise<GameView> {
     return service.command(actor, view.game.id, command(view.game.revision, action));
   }
+
+  it("renames the same guest identity without changing match state, clocks or saved acknowledgements", async () => {
+    const started = await start({ timeControl: "10+5" });
+    const move = command(started.game.revision, { type: "move", from: "e2", to: "e4" });
+    const accepted = await service.command(white, started.game.id, move);
+    const original = await database.transaction((tx) => tx.getGame(started.game.id));
+    now += 5_000;
+    const renamed = await service.rename(white, "  A new name  ");
+    expect(renamed).toEqual({ ...white, displayName: "A new name" });
+    expect((await service.view(black, started.game.id)).game.players.white).toEqual({
+      displayName: "A new name",
+    });
+    expect(await database.transaction((tx) => tx.getGame(started.game.id))).toEqual(original);
+    expect(await service.command(white, started.game.id, move)).toEqual(accepted);
+    expect((await service.view(white, started.game.id)).seat).toBe("white");
+    expect(await database.transaction((tx) => tx.listEvents(started.game.id, 2))).toEqual([]);
+    const token = (await service.createSession("Other guest")).token;
+    expect((await service.session(token))?.displayName).toBe("Other guest");
+    await expect(service.rename(white, "\u0000Invalid")).rejects.toThrow();
+    await expect(service.rename(white, " ")).rejects.toThrow();
+    await database.pool.query(
+      "UPDATE player_sessions SET created_at=clock_timestamp()-interval '2 seconds',expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+      [white.id],
+    );
+    await expect(service.rename(white, "Expired")).rejects.toMatchObject({
+      code: "SESSION_REQUIRED",
+    });
+  });
+
+  it("rejects a rename when the unchanged guest session expires while its row lock is held", async () => {
+    await database.pool.query(
+      "UPDATE player_sessions SET expires_at=clock_timestamp()+interval '1 second' WHERE id=$1",
+      [white.id],
+    );
+    let signalLocked: () => void = () => undefined;
+    let releaseLock: () => void = () => undefined;
+    const locked = new Promise<void>((resolve) => {
+      signalLocked = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const holder = database.transaction(async (tx) => {
+      await tx.client.query("SELECT id FROM player_sessions WHERE id=$1 FOR UPDATE", [white.id]);
+      signalLocked();
+      await released;
+    });
+    await locked;
+    const rename = service.rename(white, "Expired rename");
+    const rejected = expect(rename).rejects.toMatchObject({ code: "SESSION_REQUIRED" });
+    try {
+      await expect
+        .poll(
+          async () => {
+            const result = await database.pool.query<{ blocked: boolean }>(
+              "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query='SELECT * FROM player_sessions WHERE id=$1 AND token_hash=$2 FOR UPDATE') AS blocked",
+            );
+            return result.rows[0]?.blocked;
+          },
+          { timeout: 2_000, interval: 10 },
+        )
+        .toBe(true);
+      // Wait for the database deadline itself, not an arbitrary wall-clock sleep.
+      await expect
+        .poll(
+          async () => {
+            const result = await database.pool.query<{ expired: boolean }>(
+              "SELECT expires_at<=clock_timestamp() AS expired FROM player_sessions WHERE id=$1",
+              [white.id],
+            );
+            return result.rows[0]?.expired;
+          },
+          { timeout: 2_000, interval: 10 },
+        )
+        .toBe(true);
+    } finally {
+      releaseLock();
+      await holder;
+    }
+    await rejected;
+    const stored = await database.pool.query<{ display_name: string }>(
+      "SELECT display_name FROM player_sessions WHERE id=$1",
+      [white.id],
+    );
+    expect(stored.rows[0]?.display_name).toBe("White player");
+  });
+
+  it("lists only available deliberately open rooms and publishes summaries without invitation or identity secrets", async () => {
+    const available = await service.create(white, {
+      rulesetId: "catchess",
+      color: "black",
+      timeControl: "10+5",
+      visibility: "open",
+      catchess: { host: -30, guest: 80 },
+    });
+    const privateRoom = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+    });
+    const expiredRoom = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    await database.pool.query(
+      "UPDATE matches SET created_at=to_timestamp($2/1000.0)-interval '24 hours' WHERE id=$1",
+      [expiredRoom.game.id, now],
+    );
+    const expiredHost = (await service.createSession("Expired host")).session;
+    const abandoned = await service.create(expiredHost, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    await database.pool.query(
+      "UPDATE player_sessions SET created_at=clock_timestamp()-interval '2 seconds',expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+      [expiredHost.id],
+    );
+    const occupied = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    await service.join(black, occupied.invitation.token);
+    const rooms = await service.openRooms();
+    expect(openRoomsSchema.parse({ rooms })).toEqual({ rooms });
+    expect(rooms).toEqual([
+      {
+        id: available.game.id,
+        host: { displayName: "White player", color: "black" },
+        rulesetId: "catchess",
+        timeControl: "10+5",
+        catchess: { white: 80, black: -30 },
+        createdAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+      },
+    ]);
+    expect(available.game.visibility).toBe("open");
+    expect(privateRoom.game).not.toHaveProperty("visibility");
+    const encoded = JSON.stringify(rooms);
+    for (const secret of [
+      white.id,
+      white.tokenHash,
+      available.invitation.token,
+      privateRoom.game.id,
+      abandoned.game.id,
+      occupied.game.id,
+    ])
+      expect(encoded).not.toContain(secret);
+    await service.rename(white, "Updated host");
+    expect((await service.openRooms())[0]?.host.displayName).toBe("Updated host");
+    await expect(service.joinOpen(black, privateRoom.game.id)).rejects.toMatchObject({
+      code: "ROOM_UNAVAILABLE",
+    });
+    await expect(service.joinOpen(black, expiredRoom.game.id)).rejects.toMatchObject({
+      code: "ROOM_UNAVAILABLE",
+    });
+    await expect(service.joinOpen(black, abandoned.game.id)).rejects.toMatchObject({
+      code: "ROOM_UNAVAILABLE",
+    });
+  });
+
+  it("caps open discovery at fifty recent rooms and excludes rows without exactly one host", async () => {
+    const created = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    await database.transaction(async (tx) => {
+      const template = await tx.getGame(created.game.id);
+      if (!template) throw new Error("Room is missing.");
+      for (let index = 0; index < 55; index += 1) {
+        const game = {
+          ...template,
+          id: randomUUID(),
+          createdAt: now + index + 1,
+          updatedAt: now + index + 1,
+        };
+        await tx.createGame(game);
+        await tx.addSeat({ gameId: game.id, color: "white", sessionId: white.id });
+      }
+      await tx.addSeat({ gameId: template.id, color: "black", sessionId: black.id });
+      const empty = { ...template, id: randomUUID() };
+      await tx.createGame(empty);
+    });
+    const rooms = await service.openRooms();
+    expect(rooms).toHaveLength(50);
+    expect(rooms[0]?.createdAt).toBe(now + 55);
+    expect(rooms.at(-1)?.createdAt).toBe(now + 6);
+    expect(rooms.map((room) => room.id)).not.toContain(created.game.id);
+  });
+
+  it("serializes open join competitors, recovers the winner's retry and atomically consumes the invitation", async () => {
+    const third = (await service.createSession("Third player")).session;
+    const created = await service.create(white, {
+      rulesetId: "standard",
+      color: "black",
+      timeControl: "5+0",
+      visibility: "open",
+    });
+    await expect(service.joinOpen(white, created.game.id)).rejects.toMatchObject({
+      code: "OWN_ROOM",
+    });
+    const results = await Promise.allSettled([
+      service.joinOpen(black, created.game.id),
+      service.joinOpen(third, created.game.id),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const winner = results[0]?.status === "fulfilled" ? black : third;
+    const loser = winner === black ? third : black;
+    const view = await service.joinOpen(winner, created.game.id);
+    expect(view.seat).toBe("white");
+    expect(view.game.revision).toBe(1);
+    expect(view.game.clocks?.runningColor).toBe("white");
+    expect(view.game.clocks?.turnStartedAt).toBe(now);
+    expect(await service.openRooms()).toEqual([]);
+    expect(await service.join(winner, created.invitation.token)).toEqual(view);
+    await expect(service.join(loser, created.invitation.token)).rejects.toMatchObject({
+      code: "INVITATION_UNAVAILABLE",
+    });
+    await expect(service.joinOpen(loser, created.game.id)).rejects.toMatchObject({
+      code: "ROOM_UNAVAILABLE",
+    });
+    expect(await database.transaction((tx) => tx.listSeats(created.game.id))).toHaveLength(2);
+    expect(await database.transaction((tx) => tx.listEvents(created.game.id, 0))).toHaveLength(1);
+  });
+
+  it("allows only one winner when an invitation races an open-room join", async () => {
+    const third = (await service.createSession("Third player")).session;
+    const created = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    const claims = await Promise.allSettled([
+      service.join(black, created.invitation.token),
+      service.joinOpen(third, created.game.id),
+    ]);
+    expect(claims.filter((claim) => claim.status === "fulfilled")).toHaveLength(1);
+    expect(await database.transaction((tx) => tx.listSeats(created.game.id))).toHaveLength(2);
+    expect((await service.view(white, created.game.id)).game.revision).toBe(1);
+  });
+
+  it("rechecks host expiry after waiting for the joining guest's capacity lock", async () => {
+    const created = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "5+0",
+      visibility: "open",
+    });
+    await database.pool.query(
+      "UPDATE player_sessions SET expires_at=to_timestamp($2/1000.0) WHERE id=$1",
+      [white.id, now + 1_000],
+    );
+    let signalLocked: () => void = () => undefined;
+    let releaseLock: () => void = () => undefined;
+    const locked = new Promise<void>((resolve) => {
+      signalLocked = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const holder = database.transaction(async (tx) => {
+      await tx.client.query("SELECT id FROM player_sessions WHERE id=$1 FOR UPDATE", [black.id]);
+      signalLocked();
+      await released;
+    });
+    await locked;
+    const join = service.joinOpen(black, created.game.id);
+    const rejected = expect(join).rejects.toMatchObject({ code: "ROOM_UNAVAILABLE" });
+    try {
+      await expect
+        .poll(
+          async () => {
+            const result = await database.pool.query<{ blocked: boolean }>(
+              "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT expires_at FROM player_sessions%') AS blocked",
+            );
+            return result.rows[0]?.blocked;
+          },
+          { timeout: 2_000, interval: 10 },
+        )
+        .toBe(true);
+      now += 1_000;
+    } finally {
+      releaseLock();
+      await holder;
+    }
+    await rejected;
+    const stored = await database.transaction((tx) => tx.getGame(created.game.id));
+    expect(stored?.status).toBe("waiting");
+    expect(stored?.revision).toBe(0);
+    expect(await database.transaction((tx) => tx.listSeats(created.game.id))).toHaveLength(1);
+    expect(
+      (await database.transaction((tx) => tx.getInvitation(tokenHash(created.invitation.token))))
+        ?.consumedAt,
+    ).toBeNull();
+  });
+
+  it("limits open joins and profile broadcasts to the authenticated guest's available seats", async () => {
+    for (let index = 0; index < 10; index += 1)
+      await service.create(black, {
+        rulesetId: "standard",
+        color: "black",
+        timeControl: "untimed",
+      });
+    const open = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    await expect(service.joinOpen(black, open.game.id)).rejects.toMatchObject({
+      code: "ROOM_LIMIT",
+    });
+    expect((await service.openRooms()).map((room) => room.id)).toEqual([open.game.id]);
+    expect(await service.profiles([open.game.id], black.id)).toEqual([]);
+    expect(await service.profiles([open.game.id], white.id)).toEqual([
+      {
+        gameId: open.game.id,
+        revision: 0,
+        players: { white: { displayName: "White player" }, black: null },
+      },
+    ]);
+    await expect(service.profiles(Array.from({ length: 101 }, () => open.game.id))).rejects.toThrow(
+      "100 games",
+    );
+  });
 
   it("maps custom Catchess settings to the host's chosen seat and keeps settings with players after a rematch", async () => {
     const created = await service.create(black, {

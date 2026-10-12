@@ -62,6 +62,13 @@ redeemed from the URL fragment and expire within 24 hours, or sooner when the
 host session or waiting room expires. Keep request bodies,
 cookies, invitation fragments and database backups out of access logs.
 
+Changing a display name updates that same guest identity; it does not renew
+the session or recover another seat. Open rooms deliberately expose the host
+name and game settings to visitors through `GET /api/lobbies`. Only waiting
+rooms with an unexpired host are listed, with a maximum of 50. Private rooms
+remain unlisted. Public joins still require a valid guest cookie and the
+normal origin, rate and room-capacity checks.
+
 Place the backend behind a reverse proxy that terminates HTTPS, forwards
 `/api/` and `/socket.io/`, and supports HTTP/1.1 WebSocket upgrades. Pass the
 original `Host`, `Origin` and forwarding headers. Set a proxy read timeout

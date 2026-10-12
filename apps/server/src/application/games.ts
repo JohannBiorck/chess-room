@@ -3,10 +3,13 @@ import {
   type CatchessConfig,
   type Color,
   type CreateGame,
+  displayNameSchema,
   type GameCommand,
   type GameOutcome,
   type GameView,
   gameViewSchema,
+  MAX_OPEN_ROOMS,
+  type OpenRoom,
   type PublicGame,
   type SessionView,
   TIME_CONTROLS,
@@ -64,6 +67,7 @@ export class GameService {
   }
 
   async createSession(displayName: string) {
+    displayName = displayNameSchema.parse(displayName);
     const token = randomBytes(32).toString("base64url");
     const session = await this.database.transaction(async (tx) => {
       const now = await this.now(tx);
@@ -78,6 +82,90 @@ export class GameService {
       return record;
     });
     return { token, session };
+  }
+
+  async rename(actor: SessionRecord, displayName: string): Promise<SessionRecord> {
+    displayName = displayNameSchema.parse(displayName);
+    return this.database.transaction(async (tx) => {
+      const session = await tx.renameSession(actor.id, actor.tokenHash, displayName);
+      if (!session)
+        throw new ApplicationError("SESSION_REQUIRED", "Your guest session has expired.", 401);
+      return session;
+    });
+  }
+
+  /** Profiles are independent of match revisions, clocks and immutable command receipts. */
+  async profiles(gameIds: string[], participantId?: string) {
+    if (gameIds.length > 100) throw new RangeError("Profile batches cannot exceed 100 games.");
+    if (gameIds.length === 0) return [];
+    const result = await this.database.pool.query<{
+      id: string;
+      revision: number;
+      color: Color;
+      display_name: string;
+    }>(
+      `SELECT m.id,m.revision,s.color,p.display_name FROM matches m
+       JOIN match_seats s ON s.match_id=m.id
+       JOIN player_sessions p ON p.id=s.session_id
+       WHERE m.id=ANY($1::uuid[]) AND ($2::uuid IS NULL OR EXISTS (
+         SELECT 1 FROM match_seats member WHERE member.match_id=m.id AND member.session_id=$2))`,
+      [gameIds, participantId ?? null],
+    );
+    const games = new Map<
+      string,
+      { gameId: string; revision: number; players: PublicGame["players"] }
+    >();
+    for (const row of result.rows) {
+      let game = games.get(row.id);
+      if (!game) {
+        game = { gameId: row.id, revision: row.revision, players: { white: null, black: null } };
+        games.set(row.id, game);
+      }
+      game.players[row.color] = { displayName: row.display_name };
+    }
+    return [...games.values()];
+  }
+
+  async openRooms(): Promise<OpenRoom[]> {
+    return this.database.transaction(async (tx) => {
+      const now = await this.now(tx);
+      const result = await tx.client.query<{
+        id: string;
+        ruleset_id: OpenRoom["rulesetId"];
+        lifecycle: JsonObject;
+        engine_state: JsonObject;
+        color: Color;
+        display_name: string;
+        created_at: Date;
+        expires_at: Date;
+      }>(
+        `SELECT m.id,m.ruleset_id,m.lifecycle,m.engine_state,s.color,p.display_name,
+                m.created_at,p.expires_at FROM matches m
+         JOIN match_seats s ON s.match_id=m.id
+         JOIN player_sessions p ON p.id=s.session_id
+         WHERE m.status='waiting' AND m.rules_config->>'visibility'='open'
+           AND m.created_at>to_timestamp($1/1000.0)-interval '24 hours'
+           AND p.expires_at>to_timestamp($1/1000.0)
+           AND NOT EXISTS (SELECT 1 FROM match_seats other
+             WHERE other.match_id=m.id AND other.color<>s.color)
+         ORDER BY m.created_at DESC,m.id LIMIT $2`,
+        [now, MAX_OPEN_ROOMS],
+      );
+      return result.rows.map((row) => ({
+        id: row.id,
+        host: { displayName: row.display_name, color: row.color },
+        rulesetId: row.ruleset_id,
+        timeControl: (row.lifecycle as unknown as Lifecycle).timeControl,
+        ...(row.ruleset_id === "catchess"
+          ? { catchess: engineStateSchema.parse(row.engine_state).catchess }
+          : {}),
+        createdAt: row.created_at.getTime(),
+        expiresAt: Math.min(
+          row.created_at.getTime() + INVITATION_LIFETIME,
+          row.expires_at.getTime(),
+        ),
+      }));
+    });
   }
 
   private async requireSeat(tx: Transaction, gameId: string, actor: SessionRecord): Promise<Color> {
@@ -135,6 +223,7 @@ export class GameService {
       rulesetId: state.rulesetId,
       rulesVersion: 1,
       timeControl: life.timeControl,
+      ...(game.rulesConfig.visibility === "open" ? { visibility: "open" as const } : {}),
       ...(state.rulesetId === "catchess" ? { catchess: state.catchess } : {}),
       players,
       position,
@@ -397,6 +486,65 @@ export class GameService {
       this.start(game, now);
       await this.persist(tx, game, "joined", now);
       return { game: await this.project(tx, game, now), seat: invitation.color };
+    });
+  }
+
+  async joinOpen(actor: SessionRecord, id: string): Promise<GameView> {
+    return this.database.transaction(async (tx) => {
+      const game = await tx.lockGame(id);
+      const unavailable = () =>
+        new ApplicationError(
+          "ROOM_UNAVAILABLE",
+          "This open room is no longer available. Choose another room.",
+          409,
+        );
+      if (game?.rulesConfig.visibility !== "open") throw unavailable();
+      if (!(await tx.getSession(actor.tokenHash)))
+        throw new ApplicationError("SESSION_REQUIRED", "Your guest session has expired.", 401);
+      const seats = await tx.listSeats(id);
+      const existing = seats.find((seat) => seat.sessionId === actor.id);
+      let now = await this.now(tx);
+      // A lost join acknowledgement remains recoverable once this room has started.
+      if (existing && game.status !== "waiting")
+        return { game: await this.project(tx, game, now), seat: existing.color };
+      if (existing)
+        throw new ApplicationError(
+          "OWN_ROOM",
+          "You already host this room. Wait for another player.",
+          409,
+        );
+      if (
+        game.status !== "waiting" ||
+        seats.length !== 1 ||
+        game.createdAt + INVITATION_LIFETIME <= now
+      )
+        throw unavailable();
+      const host = seats[0];
+      if (!host) throw unavailable();
+      await this.requireCapacity(tx, actor.id);
+      // Capacity can wait on the guest's session lock. Evaluate expiry and start
+      // the clock only after that wait, while still owning the match lock.
+      now = await this.now(tx);
+      const owner = await tx.client.query<{ expires_at: Date }>(
+        "SELECT expires_at FROM player_sessions WHERE id=$1",
+        [host.sessionId],
+      );
+      if (
+        game.createdAt + INVITATION_LIFETIME <= now ||
+        (owner.rows[0]?.expires_at.getTime() ?? 0) <= now
+      )
+        throw unavailable();
+      const seat = oppositeColor(host.color);
+      await tx.addSeat({ gameId: id, color: seat, sessionId: actor.id });
+      // The same match lock serializes invitation and public joins. Consuming its
+      // remaining invitation atomically prevents an invite from claiming a third seat.
+      await tx.client.query(
+        "UPDATE invitations SET consumed_by=$2,consumed_at=to_timestamp($3/1000.0) WHERE match_id=$1 AND consumed_at IS NULL",
+        [id, actor.id, now],
+      );
+      this.start(game, now);
+      await this.persist(tx, game, "joined", now);
+      return { game: await this.project(tx, game, now), seat };
     });
   }
 

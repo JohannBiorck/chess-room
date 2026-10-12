@@ -1,4 +1,10 @@
-import { type GameCommand, gameCommandSchema, gameViewSchema } from "@chess-room/contracts";
+import { randomUUID } from "node:crypto";
+import {
+  type GameCommand,
+  gameCommandSchema,
+  gameViewSchema,
+  openRoomsSchema,
+} from "@chess-room/contracts";
 import {
   type Browser,
   type BrowserContext,
@@ -21,10 +27,13 @@ const SESSION_BUDGET_WINDOW_MS = 60_050;
 const SESSION_BUDGET = 18;
 const sessionReservations: number[] = [];
 let firstTestInWorker = true;
+let reservedForCurrentTest = 2;
 
 test.beforeEach(async ({ browser: _browser }, testInfo) => {
-  // Two guest sessions per room, with spare capacity for the stranger test.
+  // Reserve guest-session requests, including recovery with an existing
+  // cookie, without changing the production rate guard.
   // A replacement worker cannot remember the previous worker's reservations.
+  reservedForCurrentTest = testInfo.tags.includes("@three-session-requests") ? 3 : 2;
   const recoveryWait = firstTestInWorker && testInfo.workerIndex > 0 ? SESSION_BUDGET_WINDOW_MS : 0;
   firstTestInWorker = false;
   if (recoveryWait > 0) {
@@ -38,8 +47,8 @@ test.beforeEach(async ({ browser: _browser }, testInfo) => {
       sessionReservations[0] + SESSION_BUDGET_WINDOW_MS <= now
     )
       sessionReservations.shift();
-    if (sessionReservations.length + 2 <= SESSION_BUDGET) {
-      sessionReservations.push(now, now);
+    if (sessionReservations.length + reservedForCurrentTest <= SESSION_BUDGET) {
+      sessionReservations.push(...Array.from({ length: reservedForCurrentTest }, () => now));
       return;
     }
     const wait = (sessionReservations[0] ?? now) + SESSION_BUDGET_WINDOW_MS - now;
@@ -52,7 +61,11 @@ test.afterEach(() => {
   // Retain slots through the end of the test: session requests happen after
   // its reservation, so expiring slots from its start can release them early.
   const completedAt = Date.now();
-  sessionReservations.splice(-2, 2, completedAt, completedAt);
+  sessionReservations.splice(
+    -reservedForCurrentTest,
+    reservedForCurrentTest,
+    ...Array.from({ length: reservedForCurrentTest }, () => completedAt),
+  );
 });
 
 async function createRoom(
@@ -63,6 +76,8 @@ async function createRoom(
     mobile?: boolean;
     cats?: { host: number; guest: number };
     reducedMotion?: "reduce" | "no-preference";
+    hostName?: string;
+    visibility?: "private" | "open";
   } = {},
 ): Promise<Players> {
   const hostContext = await browser.newContext({
@@ -82,7 +97,7 @@ async function createRoom(
   host.on("pageerror", (error) => pageErrors.push(error.message));
   friend.on("pageerror", (error) => pageErrors.push(error.message));
   await host.goto("/");
-  await host.getByLabel("Your display name").fill("Alex");
+  await host.getByLabel("Your display name").fill(options.hostName ?? "Alex");
   await host.getByLabel("Your pieces").selectOption("white");
   if (options.mode)
     await host
@@ -100,9 +115,17 @@ async function createRoom(
     await setCatChance(host, "Friend’s cat", options.cats.guest);
   }
   if (options.time) await host.getByLabel("Time control").selectOption(options.time);
-  await host.getByRole("button", { name: "Create private room" }).click();
-  await expect(host.getByRole("heading", { name: "Waiting for your friend" })).toBeVisible();
-  const invitation = await host.getByLabel("Private invitation link").inputValue();
+  const open = options.visibility === "open";
+  if (open) await host.getByRole("radio", { name: /Open lobby/ }).check();
+  await host
+    .getByRole("button", { name: open ? "Create open room" : "Create private room" })
+    .click();
+  await expect(
+    host.getByRole("heading", {
+      name: open ? "Waiting for an opponent" : "Waiting for your friend",
+    }),
+  ).toBeVisible();
+  const invitation = open ? "" : await host.getByLabel("Private invitation link").inputValue();
   return { host, friend, contexts: [hostContext, friendContext], invitation, pageErrors };
 }
 
@@ -233,6 +256,38 @@ async function closePlayers(players: Players): Promise<void> {
   expect(players.pageErrors).toEqual([]);
 }
 
+function uniqueName(prefix: string) {
+  return `${prefix}-${randomUUID().slice(0, 8)}`;
+}
+
+async function changeDisplayName(page: Page, name: string) {
+  const trigger = page.getByRole("button", { name: "Change display name", exact: true });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Change display name", exact: true });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("New display name", { exact: true }).fill(name);
+  await dialog.getByRole("button", { name: "Save name", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator("header").getByText(name, { exact: true })).toBeVisible();
+}
+
+async function joinOpenRoom(page: Page, hostName: string, displayName: string) {
+  const rooms = page.getByRole("region", { name: "Open rooms", exact: true });
+  await expect(rooms).toBeVisible();
+  const card = rooms.getByRole("listitem").filter({ hasText: hostName });
+  await expect(card).toHaveCount(1);
+  const join = card.getByRole("button", { name: `Join ${hostName}’s room`, exact: true });
+  await join.focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Join open room", exact: true });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Display name to join", { exact: true }).fill(displayName);
+  await dialog.getByRole("button", { name: "Join room", exact: true }).focus();
+  await page.keyboard.press("Enter");
+}
+
 test("a legal move displays immediately while the real command is held and cannot be sent twice", async ({
   browser,
 }, testInfo) => {
@@ -335,7 +390,7 @@ test("a server rejection rolls back an immediate move preview and restores legal
   }
 });
 
-test("a lost command acknowledgement retries the same command without applying the move twice", async ({
+test("a lost command acknowledgement retries safely without repeating a move or reverting a changed name", async ({
   browser,
 }) => {
   const players = await createRoom(browser);
@@ -357,9 +412,30 @@ test("a lost command acknowledgement retries the same command without applying t
       "aria-label",
       /white pawn/,
     );
+    const renamed = uniqueName("Retry");
+    await changeDisplayName(players.host, renamed);
+    await expect(
+      players.friend.locator(".player-identity strong").filter({ hasText: renamed }),
+    ).toBeVisible();
+    const retried = players.host.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        /\/api\/games\/[^/]+\/commands$/.test(new URL(response.url()).pathname) &&
+        response.status() === 200,
+    );
     await players.host.getByRole("button", { name: "Retry command" }).click();
+    // The immutable original receipt still has its old name. Applying it must
+    // preserve the current session and player names rather than replaying them.
+    expect(gameViewSchema.parse(await (await retried).json()).game.players.white?.displayName).toBe(
+      "Alex",
+    );
     await expect(players.host.getByRole("alert")).toHaveCount(0);
     await expect(players.host.getByText("1 move", { exact: true })).toBeVisible();
+    await expect(players.host.locator("header").getByText(renamed, { exact: true })).toBeVisible();
+    await expect(
+      players.host.locator(".player-identity strong").filter({ hasText: renamed }),
+    ).toBeVisible();
+    expect((await readGame(players.host)).game.players.white?.displayName).toBe(renamed);
     expect(commands).toHaveLength(2);
     expect(commands[1]).toEqual(commands[0]);
   } finally {
@@ -411,9 +487,9 @@ test("two independent friends complete a keyboard-only checkmate, resume, and ag
   }
 });
 
-test("host refresh recovers invitation safely and completed games reject a consumed invitation", async ({
-  browser,
-}) => {
+test("host refresh recovers invitation safely and completed games reject a consumed invitation", {
+  tag: "@three-session-requests",
+}, async ({ browser }) => {
   const players = await createRoom(browser);
   try {
     await players.host.reload();
@@ -1054,6 +1130,303 @@ test("Catchess off setting and reduced motion preserve real pawn changes without
       await players.host.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
     ).toBe(true);
   } finally {
+    await closePlayers(players);
+  }
+});
+
+test(
+  "display names change from the keyboard without losing seats, moves or running clocks",
+  {
+    tag: "@three-session-requests",
+  },
+  async ({ browser }, testInfo) => {
+    const players = await createRoom(browser, { time: "10+5", mobile: true });
+    const hostName = uniqueName("Nova");
+    const guestName = uniqueName("Sage");
+    try {
+      await joinRoom(players);
+      await move(players.host, "e2", "e4");
+      await move(players.friend, "e7", "e5");
+      await expect(players.host.getByText("2 moves", { exact: true })).toBeVisible();
+      const before = await readGame(players.host);
+      expect(before.game.clocks?.runningColor).toBe("white");
+
+      await players.host.getByRole("button", { name: "Change display name", exact: true }).click();
+      const cancelled = players.host.getByRole("dialog", {
+        name: "Change display name",
+        exact: true,
+      });
+      await expect(cancelled).toBeVisible();
+      await players.host.screenshot({
+        path: testInfo.outputPath("name-editor.png"),
+        fullPage: true,
+      });
+      await cancelled.getByLabel("New display name", { exact: true }).fill("Not saved");
+      await players.host.keyboard.press("Escape");
+      await expect(cancelled).toHaveCount(0);
+      await expect(players.host.locator("header").getByText("Alex", { exact: true })).toBeVisible();
+      await expect(
+        players.host.getByRole("button", { name: "Change display name", exact: true }),
+      ).toBeFocused();
+
+      await changeDisplayName(players.host, hostName);
+      await expect(
+        players.friend.getByRole("heading", { name: `${hostName}’s move`, exact: true }),
+      ).toBeVisible();
+      await expect(
+        players.friend.locator(".player-identity strong").filter({ hasText: hostName }),
+      ).toBeVisible();
+      await changeDisplayName(players.friend, guestName);
+      await expect(
+        players.host.locator(".player-identity strong").filter({ hasText: guestName }),
+      ).toBeVisible();
+      const renamed = await readGame(players.host);
+      expect(renamed.seat).toBe(before.seat);
+      expect(renamed.game.id).toBe(before.game.id);
+      expect(renamed.game.revision).toBe(before.game.revision);
+      expect(renamed.game.position).toEqual(before.game.position);
+      expect(renamed.game.players).toEqual({
+        white: { displayName: hostName },
+        black: { displayName: guestName },
+      });
+      expect(renamed.game.clocks?.runningColor).toBe(before.game.clocks?.runningColor);
+      expect(renamed.game.clocks?.turnStartedAt).toBe(before.game.clocks?.turnStartedAt);
+      expect(renamed.game.clocks?.blackMs).toBe(before.game.clocks?.blackMs);
+      expect(renamed.game.clocks?.whiteMs).toBeLessThanOrEqual(before.game.clocks?.whiteMs ?? 0);
+
+      await players.host.reload();
+      await expect(
+        players.host.locator("header").getByText(hostName, { exact: true }),
+      ).toBeVisible();
+      await expect(players.host.getByText("2 moves", { exact: true })).toBeVisible();
+      expect((await readGame(players.host)).seat).toBe("white");
+      await players.friend.reload();
+      await expect(
+        players.friend.locator("header").getByText(guestName, { exact: true }),
+      ).toBeVisible();
+      expect((await readGame(players.friend)).seat).toBe("black");
+      await keyboardMove(players.host, "g1", "f3");
+      await expect(players.friend.locator('[data-square="f3"]')).toHaveAttribute(
+        "aria-label",
+        /white knight/,
+      );
+      await expect(
+        players.host.getByRole("heading", { name: `${guestName}’s move`, exact: true }),
+      ).toBeVisible();
+      await expect(players.host.getByText("3 moves", { exact: true })).toBeVisible();
+      expect(
+        await players.host.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      ).toBe(true);
+      await players.host.screenshot({
+        path: testInfo.outputPath("changed-display-names.png"),
+        fullPage: true,
+      });
+
+      // A session failure must close the editor permanently. Recovering a
+      // still-valid cookie later must not reopen its abandoned draft.
+      await players.host.route(
+        /\/api\/session\/name$/,
+        async (route) => {
+          await route.fulfill({
+            status: 401,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: { code: "SESSION_REQUIRED", message: "Your guest session has expired." },
+            }),
+          });
+        },
+        { times: 1 },
+      );
+      await players.host.getByRole("button", { name: "Change display name", exact: true }).click();
+      const expiredEditor = players.host.getByRole("dialog", {
+        name: "Change display name",
+        exact: true,
+      });
+      await expiredEditor.getByLabel("New display name", { exact: true }).fill("Expired draft");
+      await expiredEditor.getByRole("button", { name: "Save name", exact: true }).click();
+      await expect(expiredEditor).toHaveCount(0);
+      await expect(
+        players.host.getByRole("button", { name: "Change display name", exact: true }),
+      ).toHaveCount(0);
+      await expect(players.host.getByRole("alert")).toContainText(
+        "Your guest session has expired.",
+      );
+      await players.host.getByRole("button", { name: "Lobby", exact: true }).click();
+      await players.host.getByLabel("Your display name", { exact: true }).fill(hostName);
+      await players.host.getByLabel("Your pieces", { exact: true }).selectOption("white");
+      await players.host.getByRole("button", { name: "Create private room", exact: true }).click();
+      await expect(
+        players.host.getByRole("heading", { name: "Waiting for your friend", exact: true }),
+      ).toBeVisible();
+      await expect(
+        players.host.getByRole("button", { name: "Change display name", exact: true }),
+      ).toBeVisible();
+      await expect(expiredEditor).toHaveCount(0);
+      await expect(
+        players.host.locator("header").getByText(hostName, { exact: true }),
+      ).toBeVisible();
+      await expect(players.host.getByLabel("Private invitation link", { exact: true })).toHaveValue(
+        /#invite=/,
+      );
+      const recovered = await readGame(players.host);
+      expect(recovered.game.id).not.toBe(before.game.id);
+      expect(recovered.game.phase).toBe("waiting");
+      expect(recovered.seat).toBe("white");
+      expect(recovered.game.players.white?.displayName).toBe(hostName);
+    } finally {
+      await closePlayers(players);
+    }
+  },
+);
+
+test("a fresh mobile visitor discovers an open room, joins from the keyboard and removes it from discovery", async ({
+  browser,
+}, testInfo) => {
+  const originalName = uniqueName("Open");
+  const hostName = uniqueName("Open");
+  const players = await createRoom(browser, {
+    visibility: "open",
+    hostName: originalName,
+    mode: "catchess",
+    cats: { host: 0, guest: 0 },
+    time: "10+5",
+  });
+  const observerContext = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+  players.contexts.push(observerContext);
+  const observer = await observerContext.newPage();
+  observer.on("pageerror", (error) => players.pageErrors.push(error.message));
+  try {
+    await changeDisplayName(players.host, hostName);
+    const waiting = await readGame(players.host);
+    expect(waiting.game.phase).toBe("waiting");
+    expect(waiting.game.visibility).toBe("open");
+    await expect(players.host.getByLabel("Private invitation link")).toHaveCount(0);
+    await players.friend.setViewportSize({ width: 390, height: 844 });
+    await players.friend.goto("/");
+    await observer.goto("/");
+    const rooms = players.friend.getByRole("region", { name: "Open rooms", exact: true });
+    const card = rooms.getByRole("listitem").filter({ hasText: hostName });
+    await expect(rooms.getByRole("listitem").filter({ hasText: originalName })).toHaveCount(0);
+    await expect(card).toContainText("Catchess");
+    await expect(card).toContainText("10 minutes + 5 seconds");
+    await expect(
+      observer
+        .getByRole("region", { name: "Open rooms", exact: true })
+        .getByRole("listitem")
+        .filter({ hasText: hostName }),
+    ).toHaveCount(1);
+    expect(
+      await players.friend.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    ).toBe(true);
+    await players.friend.screenshot({
+      path: testInfo.outputPath("open-rooms-mobile.png"),
+      fullPage: true,
+    });
+
+    await joinOpenRoom(players.friend, hostName, "Robin");
+    await expect(
+      players.friend.getByRole("dialog", { name: "Join open room", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      players.host.getByRole("heading", { name: "Your move", exact: true }),
+    ).toBeVisible();
+    await expect(
+      players.friend.getByRole("heading", { name: `${hostName}’s move`, exact: true }),
+    ).toBeVisible();
+    const joined = await readGame(players.friend);
+    expect(joined.game.id).toBe(waiting.game.id);
+    expect(joined.seat).toBe("black");
+    expect(new URL(players.friend.url()).hash).toBe("");
+    await expect(
+      observer
+        .getByRole("region", { name: "Open rooms", exact: true })
+        .getByRole("listitem")
+        .filter({ hasText: hostName }),
+    ).toHaveCount(0);
+    const response = await observer.request.get("/api/lobbies");
+    expect(response.status()).toBe(200);
+    expect(openRoomsSchema.parse(await response.json()).rooms.map((room) => room.id)).not.toContain(
+      waiting.game.id,
+    );
+    await move(players.host, "e2", "e4");
+    await expect(players.friend.locator('[data-square="e4"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+  } finally {
+    await closePlayers(players);
+  }
+});
+
+test("private invitation rooms stay absent from public discovery for an anonymous visitor", async ({
+  browser,
+}) => {
+  const hostName = uniqueName("Private");
+  const players = await createRoom(browser, { hostName });
+  try {
+    const privateRoom = (await readGame(players.host)).game;
+    await players.friend.goto("/");
+    const rooms = players.friend.getByRole("region", { name: "Open rooms", exact: true });
+    await expect(rooms).toBeVisible();
+    await expect(rooms.getByRole("listitem").filter({ hasText: hostName })).toHaveCount(0);
+    const response = await players.friend.request.get("/api/lobbies");
+    expect(response.status()).toBe(200);
+    const listing = openRoomsSchema.parse(await response.json());
+    expect(listing.rooms.map((room) => room.id)).not.toContain(privateRoom.id);
+    expect(listing.rooms.map((room) => room.host.displayName)).not.toContain(hostName);
+    expect(privateRoom.visibility).toBeUndefined();
+    await expect(players.friend.getByLabel("Your display name", { exact: true })).toBeVisible();
+    await expect(
+      players.friend.getByRole("button", { name: "Change display name", exact: true }),
+    ).toHaveCount(0);
+  } finally {
+    await closePlayers(players);
+  }
+});
+
+test("a visitor with a stale open room sees a useful error after another player takes its seat", {
+  tag: "@three-session-requests",
+}, async ({ browser }) => {
+  const hostName = uniqueName("Race");
+  const players = await createRoom(browser, { visibility: "open", hostName });
+  const staleContext = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+  players.contexts.push(staleContext);
+  const stale = await staleContext.newPage();
+  stale.on("pageerror", (error) => players.pageErrors.push(error.message));
+  let releaseListing = () => {};
+  const released = new Promise<void>((resolve) => {
+    releaseListing = resolve;
+  });
+  const pattern = /\/api\/lobbies$/;
+  const heldListing = async (route: Route) => {
+    await released;
+    await route.continue();
+  };
+  try {
+    await players.friend.goto("/");
+    await stale.goto("/");
+    await expect(
+      stale
+        .getByRole("region", { name: "Open rooms", exact: true })
+        .getByRole("listitem")
+        .filter({ hasText: hostName }),
+    ).toHaveCount(1);
+    await stale.route(pattern, heldListing);
+    await joinOpenRoom(players.friend, hostName, "First player");
+    await expect(
+      players.host.getByRole("heading", { name: "Your move", exact: true }),
+    ).toBeVisible();
+    await joinOpenRoom(stale, hostName, "Late player");
+    await expect(stale.getByRole("alert")).toContainText(
+      "This open room is no longer available. Choose another room.",
+    );
+    await expect(stale.getByRole("table", { name: "Chess board" })).toHaveCount(0);
+    const joined = await readGame(players.friend);
+    expect(joined.game.players.black?.displayName).toBe("First player");
+    expect(joined.seat).toBe("black");
+  } finally {
+    releaseListing();
+    await stale.unrouteAll({ behavior: "wait" });
     await closePlayers(players);
   }
 });

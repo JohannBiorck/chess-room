@@ -5,7 +5,9 @@ import {
   type CreateGame,
   type GameCommand,
   gameViewSchema,
+  openRoomsSchema,
   type PublicGame,
+  playerUpdateSchema,
   publicEnginePositionSchema,
   publicGameSchema,
   type TimeControl,
@@ -212,6 +214,429 @@ describe("HTTP and real Socket.IO game transport", () => {
       socket.on("game:updated", receive);
     });
   }
+
+  function playersUpdated(socket: Socket) {
+    return new Promise<ReturnType<typeof playerUpdateSchema.parse>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        socket.off("game:players", receive);
+        reject(new Error("Renamed player update was not received."));
+      }, 3_000);
+      const receive = (payload: unknown) => {
+        clearTimeout(timer);
+        socket.off("game:players", receive);
+        resolve(playerUpdateSchema.parse(payload));
+      };
+      socket.on("game:players", receive);
+    });
+  }
+
+  it("discovers only public waiting rooms anonymously and joins a seat without an invitation", async () => {
+    const host = await guest("Public host");
+    const friend = await guest("Public friend");
+    const privateRoom = await create(host);
+    const open = await create(host, application, "10+5", { visibility: "open", color: "black" });
+    const listed = await application.server.inject({ method: "GET", url: "/api/lobbies" });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.headers["cache-control"]).toBe("no-store");
+    const rooms = openRoomsSchema.parse(listed.json()).rooms;
+    expect(rooms).toHaveLength(1);
+    expect(rooms[0]).toMatchObject({
+      id: open.game.id,
+      host: { displayName: "Public host", color: "black" },
+      timeControl: "10+5",
+    });
+    expect(JSON.stringify(rooms)).not.toContain(privateRoom.game.id);
+    expect(JSON.stringify(rooms)).not.toContain(open.invitation.token);
+    expect(
+      (await application.server.inject({ method: "GET", url: `/api/games/${open.game.id}` }))
+        .statusCode,
+    ).toBe(401);
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const hostSocket = await socketAt(address, host);
+    gameViewSchema.parse(await subscribe(hostSocket, open.game.id));
+    const updatedGame = updated(hostSocket, 1);
+    const joined = await application.server.inject({
+      method: "POST",
+      url: `/api/lobbies/${open.game.id}/join`,
+      headers: { origin, cookie: friend },
+      payload: {},
+    });
+    expect(joined.statusCode).toBe(200);
+    const view = gameViewSchema.parse(joined.json());
+    expect(view.seat).toBe("white");
+    expect(await updatedGame).toEqual(view.game);
+    expect(
+      (await application.server.inject({ method: "GET", url: "/api/lobbies" })).json(),
+    ).toEqual({ rooms: [] });
+    const retried = gameViewSchema.parse(
+      (
+        await application.server.inject({
+          method: "POST",
+          url: `/api/lobbies/${open.game.id}/join`,
+          headers: { origin, cookie: friend },
+          payload: {},
+        })
+      ).json(),
+    );
+    expect(retried.seat).toBe(view.seat);
+    expect({ ...retried.game, clocks: null }).toEqual({ ...view.game, clocks: null });
+    expect({ ...retried.game.clocks, serverNow: 0 }).toEqual({ ...view.game.clocks, serverNow: 0 });
+    expect(application.scheduler).toBeUndefined();
+  });
+
+  it("validates and authenticates public joins and profile edits, bounds their request rates and preserves cookies", async () => {
+    const cookie = await guest("Original");
+    const before = await application.server.inject({
+      method: "GET",
+      url: "/api/session",
+      headers: { cookie },
+    });
+    const joinedPath = `/api/lobbies/${randomUUID()}/join`;
+    expect(
+      (
+        await application.server.inject({
+          method: "POST",
+          url: joinedPath,
+          headers: { origin },
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(401);
+    expect(
+      (
+        await application.server.inject({
+          method: "POST",
+          url: joinedPath,
+          headers: { origin, cookie },
+          payload: { sessionId: randomUUID() },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await application.server.inject({
+          method: "POST",
+          url: joinedPath,
+          headers: { origin, cookie },
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(
+      (
+        await application.server.inject({
+          method: "POST",
+          url: "/api/session/name",
+          headers: { origin },
+          payload: { displayName: "Other" },
+        })
+      ).statusCode,
+    ).toBe(401);
+    for (const payload of [
+      { displayName: "" },
+      { displayName: "X".repeat(33) },
+      { displayName: "Bad\u0000name" },
+      { displayName: "Other", sessionId: randomUUID() },
+    ]) {
+      expect(
+        (
+          await application.server.inject({
+            method: "POST",
+            url: "/api/session/name",
+            headers: { origin, cookie },
+            payload,
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
+    const renamed = await application.server.inject({
+      method: "POST",
+      url: "/api/session/name",
+      headers: { origin, cookie },
+      payload: { displayName: "  Updated  " },
+    });
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.headers["set-cookie"]).toBeUndefined();
+    expect(renamed.json()).toEqual({
+      session: { ...before.json().session, displayName: "Updated" },
+    });
+    expect(Object.keys(renamed.json().session).sort()).toEqual(["displayName", "expiresAt"]);
+    for (let index = 0; index < 19; index += 1)
+      expect(
+        (
+          await application.server.inject({
+            method: "POST",
+            url: "/api/session/name",
+            headers: { origin, cookie },
+            payload: { displayName: "Updated" },
+          })
+        ).statusCode,
+      ).toBe(200);
+    expect(
+      (
+        await application.server.inject({
+          method: "POST",
+          url: "/api/session/name",
+          headers: { origin, cookie },
+          payload: { displayName: "Limited" },
+        })
+      ).statusCode,
+    ).toBe(429);
+    for (let index = 0; index < 60; index += 1)
+      expect(
+        (await application.server.inject({ method: "GET", url: "/api/lobbies" })).statusCode,
+      ).toBe(200);
+    expect(
+      (await application.server.inject({ method: "GET", url: "/api/lobbies" })).statusCode,
+    ).toBe(429);
+  });
+
+  it("shares name changes only with authorized players without revising or projecting the match", async () => {
+    const { whiteCookie, blackCookie, view } = await startedGame({ timeControl: "10+5" });
+    const strangerCookie = await guest("Stranger");
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const whiteSocket = await socketAt(address, whiteCookie);
+    const blackSocket = await socketAt(address, blackCookie);
+    const stranger = await socketAt(address, strangerCookie);
+    gameViewSchema.parse(await subscribe(whiteSocket, view.game.id));
+    gameViewSchema.parse(await subscribe(blackSocket, view.game.id));
+    expect(await subscribe(stranger, view.game.id)).toMatchObject({ error: { code: "FORBIDDEN" } });
+    const strangerProfiles: unknown[] = [];
+    stranger.on("game:players", (payload: unknown) => strangerProfiles.push(payload));
+    const previous = await database.transaction((tx) => tx.getGame(view.game.id));
+    const projected = vi.spyOn(application.service, "publicView");
+    const changes = [playersUpdated(whiteSocket), playersUpdated(blackSocket)];
+    const renamed = await application.server.inject({
+      method: "POST",
+      url: "/api/session/name",
+      headers: { origin, cookie: whiteCookie },
+      payload: { displayName: "New White" },
+    });
+    expect(renamed.statusCode).toBe(200);
+    const payload = {
+      gameId: view.game.id,
+      players: { white: { displayName: "New White" }, black: { displayName: "Black" } },
+    };
+    expect(await Promise.all(changes)).toEqual([payload, payload]);
+    await application.tick();
+    expect(projected).not.toHaveBeenCalled();
+    expect(await database.transaction((tx) => tx.getGame(view.game.id))).toEqual(previous);
+    expect(strangerProfiles).toEqual([]);
+    const mine = await application.server.inject({
+      method: "GET",
+      url: `/api/games/${view.game.id}`,
+      headers: { cookie: blackCookie },
+    });
+    expect(gameViewSchema.parse(mine.json()).game.players).toEqual(payload.players);
+  });
+
+  it("detects same-revision name changes across instances and restores them on reconnect", async () => {
+    const { whiteCookie, blackCookie, view } = await startedGame();
+    const secondDatabase = new Database(connectionString, { options: `-c search_path=${schema}` });
+    extraDatabases.push(secondDatabase);
+    const second = await buildApplication({
+      database: secondDatabase,
+      config: config(),
+      logger: false,
+      workers: false,
+    });
+    applications.push(second);
+    const firstAddress = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const secondAddress = await second.server.listen({ port: 0, host: "127.0.0.1" });
+    const whiteSocket = await socketAt(firstAddress, whiteCookie);
+    const blackSocket = await socketAt(secondAddress, blackCookie);
+    gameViewSchema.parse(await subscribe(whiteSocket, view.game.id));
+    gameViewSchema.parse(await subscribe(blackSocket, view.game.id));
+    const projected = vi.spyOn(second.service, "publicView");
+    const changes = [playersUpdated(whiteSocket), playersUpdated(blackSocket)];
+    expect(
+      (
+        await application.server.inject({
+          method: "POST",
+          url: "/api/session/name",
+          headers: { origin, cookie: whiteCookie },
+          payload: { displayName: "Across instances" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    await second.tick();
+    const updates = await Promise.all(changes);
+    expect(updates[0]).toEqual(updates[1]);
+    expect(updates[0]?.players.white?.displayName).toBe("Across instances");
+    expect(projected).not.toHaveBeenCalled();
+    blackSocket.disconnect();
+    const reconnected = await socketAt(secondAddress, blackCookie);
+    const restored = gameViewSchema.parse(await subscribe(reconnected, view.game.id));
+    expect(restored.game.revision).toBe(view.game.revision);
+    expect(restored.game.players.white?.displayName).toBe("Across instances");
+  });
+
+  it("suppresses an older profile poll that finishes after a committed local rename", async () => {
+    const { whiteCookie, view } = await startedGame();
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const socket = await socketAt(address, whiteCookie);
+    gameViewSchema.parse(await subscribe(socket, view.game.id));
+    let signalReady: () => void = () => undefined;
+    let release: () => void = () => undefined;
+    const ready = new Promise<void>((resolve) => {
+      signalReady = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const profiles = application.service.profiles.bind(application.service);
+    vi.spyOn(application.service, "profiles").mockImplementationOnce(async (ids, participant) => {
+      const old = await profiles(ids, participant);
+      signalReady();
+      await released;
+      return old;
+    });
+    const changes: unknown[] = [];
+    socket.on("game:players", (payload: unknown) => changes.push(payload));
+    const tick = application.tick();
+    try {
+      await ready;
+      const change = playersUpdated(socket);
+      const renamed = await application.server.inject({
+        method: "POST",
+        url: "/api/session/name",
+        headers: { origin, cookie: whiteCookie },
+        payload: { displayName: "Latest name" },
+      });
+      expect(renamed.statusCode).toBe(200);
+      expect((await change).players.white?.displayName).toBe("Latest name");
+    } finally {
+      release();
+      await tick;
+    }
+    await application.tick();
+    expect(changes).toHaveLength(1);
+  });
+
+  it("does not publish an older remote name after a newer subscription snapshot", async () => {
+    const { whiteCookie, view } = await startedGame();
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const socket = await socketAt(address, whiteCookie);
+    gameViewSchema.parse(await subscribe(socket, view.game.id));
+    const actor = await application.service.session(whiteCookie.split("=")[1]);
+    if (!actor) throw new Error("Guest session is missing.");
+    // Direct service writes simulate another instance: this process must poll.
+    await application.service.rename(actor, "Remote first name");
+    let signalReady: () => void = () => undefined;
+    let release: () => void = () => undefined;
+    const ready = new Promise<void>((resolve) => {
+      signalReady = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const profiles = application.service.profiles.bind(application.service);
+    vi.spyOn(application.service, "profiles").mockImplementationOnce(async (ids, participant) => {
+      const old = await profiles(ids, participant);
+      signalReady();
+      await released;
+      return old;
+    });
+    const changes: unknown[] = [];
+    socket.on("game:players", (payload: unknown) => changes.push(payload));
+    const tick = application.tick();
+    try {
+      await ready;
+      await application.service.rename(actor, "Remote latest name");
+      const change = playersUpdated(socket);
+      const subscribed = gameViewSchema.parse(await subscribe(socket, view.game.id));
+      expect(subscribed.game.players.white?.displayName).toBe("Remote latest name");
+      expect((await change).players.white?.displayName).toBe("Remote latest name");
+    } finally {
+      release();
+      await tick;
+    }
+    await application.tick();
+    expect(changes).toHaveLength(1);
+  });
+
+  it("does not publish a name change when PostgreSQL rejects its commit", async () => {
+    const { whiteCookie, view } = await startedGame();
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const socket = await socketAt(address, whiteCookie);
+    gameViewSchema.parse(await subscribe(socket, view.game.id));
+    const changes: unknown[] = [];
+    socket.on("game:players", (payload: unknown) => changes.push(payload));
+    await database.pool.query(`CREATE FUNCTION reject_name_change() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'Synthetic name commit failure'; END $$;
+      CREATE CONSTRAINT TRIGGER name_commit_failure AFTER UPDATE ON player_sessions
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_name_change()`);
+    const renamed = await application.server.inject({
+      method: "POST",
+      url: "/api/session/name",
+      headers: { origin, cookie: whiteCookie },
+      payload: { displayName: "Uncommitted" },
+    });
+    expect(renamed.statusCode).toBe(503);
+    await application.tick();
+    expect(changes).toEqual([]);
+    const session = await application.server.inject({
+      method: "GET",
+      url: "/api/session",
+      headers: { cookie: whiteCookie },
+    });
+    expect(session.json().session.displayName).toBe("White");
+  });
+
+  it("does not replace a joined player's name with an older waiting-room profile", async () => {
+    const host = await guest("Host");
+    const friend = await guest("Friend");
+    const created = await create(host, application, "untimed", { visibility: "open" });
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const socket = await socketAt(address, host);
+    gameViewSchema.parse(await subscribe(socket, created.game.id));
+    let signalReady: () => void = () => undefined;
+    let release: () => void = () => undefined;
+    const ready = new Promise<void>((resolve) => {
+      signalReady = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const profiles = application.service.profiles.bind(application.service);
+    vi.spyOn(application.service, "profiles").mockImplementationOnce(async (ids, participant) => {
+      const old = await profiles(ids, participant);
+      signalReady();
+      await released;
+      return old;
+    });
+    const changes: unknown[] = [];
+    socket.on("game:players", (payload: unknown) => changes.push(payload));
+    const rename = application.server.inject({
+      method: "POST",
+      url: "/api/session/name",
+      headers: { origin, cookie: host },
+      payload: { displayName: "Renamed Host" },
+    });
+    try {
+      await ready;
+      const joinedGame = updated(socket, 1);
+      const joined = await application.server.inject({
+        method: "POST",
+        url: `/api/lobbies/${created.game.id}/join`,
+        headers: { origin, cookie: friend },
+        payload: {},
+      });
+      expect(joined.statusCode).toBe(200);
+      expect((await joinedGame).players.black?.displayName).toBe("Friend");
+    } finally {
+      release();
+    }
+    expect((await rename).statusCode).toBe(200);
+    expect(changes).toEqual([]);
+    const current = playersUpdated(socket);
+    await application.tick();
+    expect((await current).players).toEqual({
+      white: { displayName: "Renamed Host" },
+      black: { displayName: "Friend" },
+    });
+    expect(changes).toHaveLength(1);
+  });
 
   it("leaves PostgreSQL unused while idle and answers liveness probes without database reads", async () => {
     const worker = await backgroundApplication();

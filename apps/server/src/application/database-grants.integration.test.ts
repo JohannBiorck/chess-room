@@ -77,8 +77,13 @@ describe("separate migration and runtime database privileges", () => {
       rulesetId: "standard",
       color: "white",
       timeControl: "untimed",
+      visibility: "open",
     });
-    const joined = await service.join(black.session, created.invitation.token);
+    expect((await service.openRooms())[0]?.id).toBe(created.game.id);
+    const renamed = await service.rename(white.session, "Renamed White");
+    expect(renamed.id).toBe(white.session.id);
+    const joined = await service.joinOpen(black.session, created.game.id);
+    expect(joined.game.players.white?.displayName).toBe("Renamed White");
     const moved = await service.command(white.session, joined.game.id, {
       protocolVersion: 1,
       commandId: randomUUID(),
@@ -107,6 +112,7 @@ describe("separate migration and runtime database privileges", () => {
 
   it("denies migration-table access, DDL, truncate and administrative sequence access", async () => {
     await grantRuntimeAccess(owner, role, schema);
+    const before = await owner.query<{ count: string }>("SELECT count(*) FROM schema_migrations");
     for (const sql of [
       "SELECT * FROM schema_migrations",
       "INSERT INTO schema_migrations(name,checksum) VALUES ('999_forbidden.sql',repeat('a',64))",
@@ -119,7 +125,7 @@ describe("separate migration and runtime database privileges", () => {
       await expect(runtime.pool.query(sql)).rejects.toMatchObject({ code: "42501" });
     }
     const existing = await owner.query<{ count: string }>("SELECT count(*) FROM schema_migrations");
-    expect(existing.rows[0]?.count).toBe("1");
+    expect(existing.rows[0]?.count).toBe(before.rows[0]?.count);
   });
 
   it("rejects the migration owner and inherited owner membership before granting access", async () => {
