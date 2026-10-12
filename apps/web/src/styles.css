@@ -783,6 +783,35 @@ fieldset legend {
 .game-room {
   padding: 36px 0 60px;
 }
+.closed-room {
+  max-width: 620px;
+  margin: 32px auto;
+  padding: clamp(28px, 6vw, 54px);
+  text-align: center;
+  border: 1px solid #d7ded1;
+  border-radius: 12px;
+  background: #fffef9;
+}
+.closed-room-piece {
+  display: block;
+  width: 66px;
+  height: 74px;
+  margin: 0 auto 22px;
+}
+.closed-room h1 {
+  font-family: Georgia, serif;
+  font-size: clamp(30px, 5vw, 40px);
+  font-weight: 400;
+  letter-spacing: -0.035em;
+  margin: 12px 0 18px;
+}
+.closed-room p:not(.eyebrow) {
+  max-width: 420px;
+  margin: 0 auto 26px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.75;
+}
 .game-heading {
   display: flex;
   justify-content: space-between;
@@ -1102,6 +1131,10 @@ fieldset legend {
 .game-status--finished {
   background: #f0e8d6;
 }
+.game-status .room-expiry {
+  padding-top: 12px;
+  border-top: 1px solid #d0dbc6;
+}
 .check-count {
   display: flex;
   justify-content: space-between;
@@ -1155,6 +1188,16 @@ fieldset legend {
 .decision-panel h3 {
   margin: 0 0 10px;
   font-size: 14px;
+}
+.room-management {
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+}
+.room-management p {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  margin: 10px 0 0;
 }
 .history-panel {
   padding: 20px 24px 0;
@@ -1343,6 +1386,7 @@ fieldset legend {
   .game-status,
   .invite-panel,
   .decision-panel,
+  .room-management,
   .rules-details,
   .game-actions {
     padding-left: 20px;

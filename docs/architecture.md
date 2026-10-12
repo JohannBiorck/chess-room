@@ -86,6 +86,14 @@ Concurrent public and invitation joins therefore have one winner; retrying
 an accepted public join returns the same seat. Only open games add a visibility
 field to the existing public game message.
 
+The sole seated host can close a waiting room through the existing command
+protocol. Closing and joining share the match lock: whichever commits first
+decides whether the room closes or the game starts. Accepted close retries use
+the original receipt. A closed room uses the terminal storage state with an
+explicit `closure` reason and timestamp, no chess outcome and no played moves.
+Its invitations are expired, it frees room capacity, and it cannot create a
+rematch or export a chess result. Ordinary game messages omit `closure`.
+
 ## Multiple instances and recovery
 
 Socket.IO uses WebSocket transport only. A subscription validates guest expiry
@@ -124,8 +132,15 @@ clients. A move at or after its deadline loses to timeout. Clocks continue
 through disconnection and restart.
 
 Rematches create a separate match and swap colors. Catchess chances follow the
-players to their new colors. Waiting rooms expire after
-24 hours; finished games are removed after 30 days by hourly bounded cleanup.
+players to their new colors. Open waiting rooms close after one hour and private
+waiting rooms after 24 hours; the host's session expiry can close either sooner.
+The same deadline controls discovery, invitations, capacity, joins and recovery.
+Join paths recheck it after acquiring capacity locks. The idle scheduler includes
+waiting-room deadlines alongside active clocks, with bounded worker batches and
+startup recovery. Discovery and joins reject expired rooms even while physical
+closure processing is catching up after server sleep.
+
+Finished games and closed rooms are removed after 30 days by hourly bounded cleanup.
 Histories are bounded at 1,200 plies.
 
 ## Security

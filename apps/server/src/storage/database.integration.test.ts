@@ -183,6 +183,30 @@ describe.skipIf(!connectionString)("PostgreSQL durable storage", () => {
     ]);
   });
 
+  it("finds elapsed open and private waiting rooms and bounds a younger room by its host expiry", async () => {
+    const now = Date.now();
+    const open = { ...makeGame(), rulesConfig: { visibility: "open" }, createdAt: now - 3600000 };
+    const privateRoom = { ...makeGame(), createdAt: now - 86400000 };
+    const futurePrivate = { ...makeGame(), createdAt: now - 3600000 };
+    const futureOpen = {
+      ...makeGame(),
+      rulesConfig: { visibility: "open" },
+      createdAt: now - 3599999,
+    };
+    const expiredHost = { ...makeSession(), createdAt: now - 2000, expiresAt: now - 1000 };
+    const abandoned = makeGame();
+    await database.transaction(async (tx) => {
+      await tx.createSession(expiredHost);
+      for (const game of [open, privateRoom, futurePrivate, futureOpen, abandoned])
+        await tx.createGame(game);
+      await tx.addSeat({ gameId: abandoned.id, color: "white", sessionId: expiredHost.id });
+      expect((await tx.findGamesDue(100, now)).sort()).toEqual(
+        [open.id, privateRoom.id, abandoned.id].sort(),
+      );
+      expect(await tx.findGamesDue(1, now)).toHaveLength(1);
+    });
+  });
+
   it("rolls snapshots, ordered events, receipts and the outbox back together", async () => {
     const { game, session } = await seedGame();
     const commandId = randomUUID();

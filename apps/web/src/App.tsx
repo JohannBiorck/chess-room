@@ -131,6 +131,7 @@ export function App() {
             invitation={room.invitation}
             receivedAt={room.receivedAt}
             busy={room.busy}
+            commandError={room.error}
             connection={room.connection}
             onCommand={room.command}
             onReconnect={room.reconnect}

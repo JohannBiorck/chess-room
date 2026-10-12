@@ -14,7 +14,7 @@ import type { FastifyRequest } from "fastify";
 import { Server as SocketServer } from "socket.io";
 import { z } from "zod";
 import { buildServer } from "../server.js";
-import type { Database } from "../storage/database.js";
+import { type Database, waitingDeadlineSql } from "../storage/database.js";
 import type { SessionRecord } from "../storage/records.js";
 import { BackgroundScheduler } from "./background.js";
 import type { ApplicationConfig } from "./config.js";
@@ -396,9 +396,10 @@ export async function buildApplication(options: {
           deadline_at: string | null;
           database_now: string;
         }>(
-          `SELECT min((lifecycle->>'deadlineAt')::bigint)::text AS deadline_at,
+          `SELECT min(CASE WHEN m.status='active' THEN (m.lifecycle->>'deadlineAt')::bigint
+             ELSE ${waitingDeadlineSql} END)::text AS deadline_at,
            floor(extract(epoch FROM clock_timestamp())*1000)::bigint::text AS database_now
-           FROM matches WHERE status='active'`,
+           FROM matches m WHERE m.status IN ('active','waiting')`,
         );
         const row = result.rows[0];
         if (!row) throw new Error("Database did not return a background deadline.");

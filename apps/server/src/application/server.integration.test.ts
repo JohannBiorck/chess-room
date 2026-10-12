@@ -5,6 +5,7 @@ import {
   type CreateGame,
   type GameCommand,
   gameViewSchema,
+  OPEN_ROOM_LIFETIME_MS,
   openRoomsSchema,
   type PublicGame,
   playerUpdateSchema,
@@ -636,6 +637,179 @@ describe("HTTP and real Socket.IO game transport", () => {
       black: { displayName: "Friend" },
     });
     expect(changes).toHaveLength(1);
+  });
+
+  it("publishes host closure immediately to subscribed host tabs and replays its original acknowledgement", async () => {
+    const hostCookie = await guest("Host");
+    const visitorCookie = await guest("Visitor");
+    const created = await create(hostCookie, application, "10+5", { visibility: "open" });
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const hostSocket = await socketAt(address, hostCookie);
+    gameViewSchema.parse(await subscribe(hostSocket, created.game.id));
+    const close: GameCommand = {
+      protocolVersion: 1,
+      commandId: randomUUID(),
+      expectedRevision: 0,
+      action: { type: "close-room" },
+    };
+    expect((await postCommand(visitorCookie, created.game.id, close)).statusCode).toBe(403);
+    const delivered = updated(hostSocket, 1);
+    const response = await postCommand(hostCookie, created.game.id, close);
+    expect(response.statusCode).toBe(200);
+    const accepted = gameViewSchema.parse(response.json());
+    expect((await delivered).closure?.reason).toBe("host-closed");
+    expect(application.scheduler).toBeUndefined();
+    expect(accepted.game.phase).toBe("finished");
+    expect(accepted.game.outcome).toBeNull();
+    expect((await postCommand(hostCookie, created.game.id, close)).json()).toEqual(accepted);
+    expect(
+      (await application.server.inject({ method: "GET", url: "/api/lobbies" })).json(),
+    ).toEqual({ rooms: [] });
+    const join = await application.server.inject({
+      method: "POST",
+      url: `/api/lobbies/${created.game.id}/join`,
+      headers: { origin, cookie: visitorCookie },
+      payload: {},
+    });
+    expect(join.statusCode).toBe(409);
+    const refresh = await application.server.inject({
+      method: "GET",
+      url: `/api/games/${created.game.id}`,
+      headers: { cookie: hostCookie },
+    });
+    expect(gameViewSchema.parse(refresh.json()).game.closure).toEqual(accepted.game.closure);
+    const socketSnapshot = gameViewSchema.parse(await subscribe(hostSocket, created.game.id));
+    expect(socketSnapshot.game.closure).toEqual(accepted.game.closure);
+    const pgn = await application.server.inject({
+      method: "GET",
+      url: `/api/games/${created.game.id}/pgn`,
+      headers: { cookie: hostCookie },
+    });
+    expect(pgn.statusCode).toBe(409);
+    expect(pgn.json()).toMatchObject({ error: { code: "ROOM_CLOSED" } });
+  });
+
+  it("recovers expired open rooms on authorized HTTP reads and socket snapshots without workers", async () => {
+    const hostCookie = await guest("Host");
+    const visitorCookie = await guest("Visitor");
+    const first = await create(hostCookie, application, "untimed", { visibility: "open" });
+    const second = await create(hostCookie, application, "untimed", { visibility: "open" });
+    await database.pool.query(
+      "UPDATE matches SET created_at=clock_timestamp()-interval '1 hour' WHERE id=ANY($1::uuid[])",
+      [[first.game.id, second.game.id]],
+    );
+    expect(
+      (await application.server.inject({ method: "GET", url: "/api/lobbies" })).json(),
+    ).toEqual({ rooms: [] });
+    const denied = await application.server.inject({
+      method: "GET",
+      url: `/api/games/${first.game.id}`,
+      headers: { cookie: visitorCookie },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect((await database.transaction((tx) => tx.getGame(first.game.id)))?.revision).toBe(0);
+    const restored = await application.server.inject({
+      method: "GET",
+      url: `/api/games/${first.game.id}`,
+      headers: { cookie: hostCookie },
+    });
+    expect(gameViewSchema.parse(restored.json()).game).toMatchObject({
+      phase: "finished",
+      revision: 1,
+      closure: { reason: "expired" },
+      outcome: null,
+    });
+    const address = await application.server.listen({ port: 0, host: "127.0.0.1" });
+    const socket = await socketAt(address, hostCookie);
+    expect(gameViewSchema.parse(await subscribe(socket, second.game.id)).game.closure?.reason).toBe(
+      "expired",
+    );
+    for (const id of [first.game.id, second.game.id])
+      expect(await database.transaction((tx) => tx.listEvents(id, 0))).toHaveLength(1);
+  });
+
+  it("schedules a persisted waiting-room deadline after worker restart without any sockets", async () => {
+    const hostCookie = await guest("Host");
+    const created = await create(hostCookie, application, "untimed", { visibility: "open" });
+    await database.pool.query(
+      "UPDATE matches SET created_at=clock_timestamp()-interval '1 hour'+interval '400 milliseconds' WHERE id=$1",
+      [created.game.id],
+    );
+    const worker = await backgroundApplication();
+    expect(worker.io.engine.clientsCount).toBe(0);
+    await expect
+      .poll(async () => (await database.transaction((tx) => tx.getGame(created.game.id)))?.status, {
+        timeout: 5000,
+        interval: 25,
+      })
+      .toBe("finished");
+    const retained = await worker.service.publicView(created.game.id);
+    expect(retained?.closure?.reason).toBe("expired");
+    expect(retained?.outcome).toBeNull();
+    expect(retained?.revision).toBe(1);
+    expect(
+      (await database.transaction((tx) => tx.getInvitation(tokenHash(created.invitation.token))))
+        ?.consumedAt,
+    ).toBeNull();
+  });
+
+  it("wakes an idle worker for newly created waiting rooms and uses their earliest host bound", async () => {
+    const worker = await backgroundApplication();
+    const hostCookie = await guest("Host", worker);
+    const host = await worker.service.session(hostCookie.split("=")[1]);
+    if (!host) throw new Error("Host is missing.");
+    await database.pool.query(
+      "UPDATE player_sessions SET expires_at=clock_timestamp()+interval '500 milliseconds' WHERE id=$1",
+      [host.id],
+    );
+    const created = await create(hostCookie, worker, "untimed", { visibility: "open" });
+    await worker.scheduler?.settled();
+    expect(worker.io.engine.clientsCount).toBe(0);
+    await expect
+      .poll(async () => (await database.transaction((tx) => tx.getGame(created.game.id)))?.status, {
+        timeout: 5000,
+        interval: 25,
+      })
+      .toBe("finished");
+    expect((await worker.service.publicView(created.game.id))?.closure?.reason).toBe("expired");
+    const queries = vi.spyOn(database.pool, "query");
+    const transactions = vi.spyOn(database, "transaction");
+    await worker.scheduler?.settled();
+    queries.mockClear();
+    transactions.mockClear();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(queries).not.toHaveBeenCalled();
+    expect(transactions).not.toHaveBeenCalled();
+    expect(OPEN_ROOM_LIFETIME_MS).toBe(3600000);
+  });
+
+  it("limits one background tick to a hundred overdue room closures even when retention is due", async () => {
+    const hostCookie = await guest("Host");
+    const created = await create(hostCookie, application, "untimed", { visibility: "open" });
+    await database.transaction(async (tx) => {
+      const template = await tx.getGame(created.game.id);
+      const host = (await tx.listSeats(created.game.id))[0];
+      if (!template || !host) throw new Error("Room is missing.");
+      for (let index = 0; index < 100; index += 1) {
+        const game = { ...template, id: randomUUID() };
+        await tx.createGame(game);
+        await tx.addSeat({ gameId: game.id, color: "white", sessionId: host.sessionId });
+      }
+      await tx.client.query("UPDATE matches SET created_at=clock_timestamp()-interval '1 hour'");
+    });
+    await application.tick();
+    const statuses = async () =>
+      (
+        await database.pool.query<{ status: string; count: string }>(
+          "SELECT status,count(*)::text FROM matches GROUP BY status ORDER BY status",
+        )
+      ).rows;
+    expect(await statuses()).toEqual([
+      { status: "finished", count: "100" },
+      { status: "waiting", count: "1" },
+    ]);
+    await application.tick();
+    expect(await statuses()).toEqual([{ status: "finished", count: "101" }]);
   });
 
   it("leaves PostgreSQL unused while idle and answers liveness probes without database reads", async () => {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { OPEN_ROOM_LIFETIME_MS } from "@chess-room/contracts";
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
 
 import type {
@@ -11,6 +12,14 @@ import type {
   SeatRecord,
   SessionRecord,
 } from "./records.js";
+
+/** Matches are aliased as m; a waiting room is also bounded by its host session. */
+export const waitingDeadlineSql = `LEAST(
+  floor(extract(epoch FROM m.created_at)*1000)::bigint +
+    CASE WHEN m.rules_config->>'visibility'='open' THEN ${OPEN_ROOM_LIFETIME_MS} ELSE 86400000 END,
+  (SELECT floor(extract(epoch FROM min(p.expires_at))*1000)::bigint
+   FROM match_seats host JOIN player_sessions p ON p.id=host.session_id
+   WHERE host.match_id=m.id))`;
 
 interface GameRow extends QueryResultRow {
   id: string;
@@ -252,16 +261,19 @@ export class Transaction {
   }
 
   /** Candidates only: the worker must lock and reevaluate the deadline before finishing. */
-  async findGamesDue(limit = 100): Promise<string[]> {
+  async findGamesDue(limit = 100, now?: number): Promise<string[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) {
       throw new RangeError("Deadline page size must be between 1 and 1000.");
     }
     const result = await this.client.query<{ id: string }>(
-      `SELECT id FROM matches WHERE status = 'active'
-       AND (lifecycle ->> 'deadlineAt')::bigint <=
-         floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
-       ORDER BY (lifecycle ->> 'deadlineAt')::bigint, id LIMIT $1`,
-      [limit],
+      `SELECT m.id FROM matches m WHERE
+        (m.status='active' AND (m.lifecycle->>'deadlineAt')::bigint <=
+          coalesce($2::bigint,floor(extract(epoch FROM clock_timestamp())*1000)::bigint))
+        OR (m.status='waiting' AND ${waitingDeadlineSql} <=
+          coalesce($2::bigint,floor(extract(epoch FROM clock_timestamp())*1000)::bigint))
+       ORDER BY CASE WHEN m.status='active' THEN (m.lifecycle->>'deadlineAt')::bigint
+         ELSE ${waitingDeadlineSql} END,m.id LIMIT $1`,
+      [limit, now ?? null],
     );
     return result.rows.map((row) => row.id);
   }

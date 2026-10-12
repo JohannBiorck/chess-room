@@ -3,6 +3,7 @@ import { z } from "zod";
 export const PROTOCOL_VERSION = 1;
 export const MAX_GAME_PLIES = 1200;
 export const MAX_OPEN_ROOMS = 50;
+export const OPEN_ROOM_LIFETIME_MS = 60 * 60 * 1000;
 
 export const rulesetIdSchema = z.enum(["standard", "three-check", "catchess"]);
 export const colorSchema = z.enum(["white", "black"]);
@@ -98,6 +99,7 @@ export const moveActionSchema = z
 
 export const gameActionSchema = z.discriminatedUnion("type", [
   moveActionSchema,
+  z.object({ type: z.literal("close-room") }).strict(),
   z.object({ type: z.literal("resign") }).strict(),
   z.object({ type: z.literal("offer-draw") }).strict(),
   z.object({ type: z.literal("accept-draw") }).strict(),
@@ -190,6 +192,12 @@ export const publicPlayersSchema = z
   .object({ white: publicPlayerSchema.nullable(), black: publicPlayerSchema.nullable() })
   .strict();
 const timestampSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+export const roomClosureSchema = z
+  .object({
+    reason: z.enum(["host-closed", "expired"]),
+    closedAt: timestampSchema,
+  })
+  .strict();
 export const publicClocksSchema = z
   .object({
     whiteMs: z.number().min(0),
@@ -208,6 +216,7 @@ export const publicGameSchema = z
     rulesVersion: z.literal(1),
     timeControl: timeControlSchema,
     visibility: z.literal("open").optional(),
+    closure: roomClosureSchema.optional(),
     catchess: catchessConfigSchema.nullable().optional(),
     players: publicPlayersSchema,
     position: publicEnginePositionSchema,
@@ -221,6 +230,25 @@ export const publicGameSchema = z
   })
   .strict()
   .superRefine((game, context) => {
+    if (
+      game.closure &&
+      (game.phase !== "finished" ||
+        game.outcome !== null ||
+        game.position.outcome !== null ||
+        game.position.moves.length !== 0 ||
+        game.drawOffer !== null ||
+        game.rematchRequested.length !== 0 ||
+        game.rematchGameId !== null ||
+        (game.players.white === null) === (game.players.black === null) ||
+        (game.clocks !== null &&
+          (game.clocks.runningColor !== null || game.clocks.turnStartedAt !== null)) ||
+        game.closure.closedAt < game.createdAt ||
+        game.closure.closedAt > game.updatedAt)
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Closed rooms must be unplayed and have no chess result or rematch.",
+      });
     if (game.rulesetId === "catchess") {
       if (
         !game.catchess ||
@@ -300,3 +328,4 @@ export type GameView = z.infer<typeof gameViewSchema>;
 export type SessionView = z.infer<typeof sessionViewSchema>;
 export type OpenRoom = z.infer<typeof openRoomSchema>;
 export type PlayerUpdate = z.infer<typeof playerUpdateSchema>;
+export type RoomClosure = z.infer<typeof roomClosureSchema>;

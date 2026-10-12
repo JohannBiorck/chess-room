@@ -5,6 +5,7 @@ import {
   type GameCommand,
   type GameView,
   gameViewSchema,
+  OPEN_ROOM_LIFETIME_MS,
   openRoomsSchema,
 } from "@chess-room/contracts";
 import { createEngineState, engineStateSchema } from "@chess-room/game-core";
@@ -71,6 +72,418 @@ describe("durable game application", () => {
   async function act(view: GameView, actor: SessionRecord, action: GameAction): Promise<GameView> {
     return service.command(actor, view.game.id, command(view.game.revision, action));
   }
+
+  it.each(["private", "open"] as const)(
+    "lets the sole host close a %s room with one durable retryable acknowledgement",
+    async (visibility) => {
+      const created = await service.create(white, {
+        rulesetId: "standard",
+        color: "black",
+        timeControl: "10+5",
+        ...(visibility === "open" ? { visibility } : {}),
+      });
+      const close = command(0, { type: "close-room" });
+      await expect(service.command(black, created.game.id, close)).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
+      const accepted = await service.command(white, created.game.id, close);
+      expect(gameViewSchema.parse(accepted)).toEqual(accepted);
+      expect(accepted.game).toMatchObject({
+        phase: "finished",
+        revision: 1,
+        outcome: null,
+        closure: { reason: "host-closed", closedAt: now },
+        rematchRequested: [],
+        rematchGameId: null,
+      });
+      expect(accepted.game.position.moves).toEqual([]);
+      expect(accepted.game.players.white).toBeNull();
+      expect(accepted.game.clocks?.runningColor).toBeNull();
+      expect(await service.command(white, created.game.id, close)).toEqual(accepted);
+      await service.expireDue();
+      const events = await database.transaction((tx) => tx.listEvents(created.game.id, 0));
+      expect(events.map((event) => event.type)).toEqual(["close-room"]);
+      const outbox = await database.transaction((tx) => tx.claimOutbox());
+      expect(outbox.filter((event) => event.gameId === created.game.id)).toHaveLength(2);
+      const invitation = await database.transaction((tx) =>
+        tx.getInvitation(tokenHash(created.invitation.token)),
+      );
+      expect(invitation?.consumedAt).toBeNull();
+      expect(invitation?.consumedBy).toBeNull();
+      expect(invitation?.expiresAt).toBe(now);
+      await expect(service.join(black, created.invitation.token)).rejects.toMatchObject({
+        code: "INVITATION_UNAVAILABLE",
+      });
+      await expect(service.invitation(white, created.game.id)).rejects.toMatchObject({
+        code: "ROOM_CLOSED",
+      });
+      await expect(act(accepted, white, { type: "request-rematch" })).rejects.toMatchObject({
+        code: "REMATCH_UNAVAILABLE",
+      });
+      await expect(service.pgn(white, created.game.id)).rejects.toMatchObject({
+        code: "ROOM_CLOSED",
+      });
+      if (visibility === "open") {
+        expect(await service.openRooms()).toEqual([]);
+        await expect(service.joinOpen(white, created.game.id)).rejects.toMatchObject({
+          code: "ROOM_UNAVAILABLE",
+        });
+        await expect(service.joinOpen(black, created.game.id)).rejects.toMatchObject({
+          code: "ROOM_UNAVAILABLE",
+        });
+      }
+    },
+  );
+
+  it("rejects closing started and finished games without changing their result or accepting a receipt", async () => {
+    let view = await start();
+    const close = command(view.game.revision, { type: "close-room" });
+    for (const actor of [white, black])
+      await expect(service.command(actor, view.game.id, close)).rejects.toMatchObject({
+        code: "CLOSE_UNAVAILABLE",
+      });
+    expect(await service.view(white, view.game.id)).toEqual({ ...view, seat: "white" });
+    expect(
+      await database.transaction((tx) => tx.getReceipt(view.game.id, white.id, close.commandId)),
+    ).toBeNull();
+    view = await act(view, white, { type: "resign" });
+    await expect(act(view, black, { type: "close-room" })).rejects.toMatchObject({
+      code: "CLOSE_UNAVAILABLE",
+    });
+    expect((await service.view(black, view.game.id)).game.outcome).toEqual({
+      winner: "black",
+      reason: "resignation",
+    });
+  });
+
+  it.each(["public", "invitation"] as const)(
+    "serializes room closure against a concurrent %s join",
+    async (route) => {
+      const created = await service.create(white, {
+        rulesetId: "standard",
+        color: "white",
+        timeControl: "untimed",
+        visibility: "open",
+      });
+      const close = command(0, { type: "close-room" });
+      const results = await Promise.allSettled([
+        service.command(white, created.game.id, close),
+        route === "public"
+          ? service.joinOpen(black, created.game.id)
+          : service.join(black, created.invitation.token),
+      ]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      const retained = await service.view(white, created.game.id);
+      expect(retained.game.revision).toBe(1);
+      expect(await database.transaction((tx) => tx.listEvents(created.game.id, 0))).toHaveLength(1);
+      const seats = await database.transaction((tx) => tx.listSeats(created.game.id));
+      expect(seats).toHaveLength(retained.game.closure ? 1 : 2);
+      expect(retained.game.phase).toBe(retained.game.closure ? "finished" : "active");
+    },
+  );
+
+  it("allows one room-close receipt when two host commands race and rejects altered retry payloads", async () => {
+    const created = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+    });
+    const close = command(0, { type: "close-room" });
+    const results = await Promise.all([
+      service.command(white, created.game.id, close),
+      service.command(white, created.game.id, close),
+    ]);
+    expect(results[0]).toEqual(results[1]);
+    await expect(
+      service.command(white, created.game.id, { ...close, action: { type: "resign" } }),
+    ).rejects.toMatchObject({ code: "COMMAND_REUSED" });
+    expect(await database.transaction((tx) => tx.listEvents(created.game.id, 0))).toHaveLength(1);
+  });
+
+  it("caps open invitations and discovery at exactly one hour while private rooms keep their original lifetime", async () => {
+    const open = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    const privateRoom = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+    });
+    expect(open.invitation.expiresAt).toBe(now + OPEN_ROOM_LIFETIME_MS);
+    expect(privateRoom.invitation.expiresAt).toBe(now + 86400000);
+    now += OPEN_ROOM_LIFETIME_MS - 1;
+    expect((await service.openRooms()).map((room) => room.id)).toEqual([open.game.id]);
+    expect((await service.invitation(white, open.game.id)).expiresAt).toBe(
+      open.invitation.expiresAt,
+    );
+    expect((await service.view(white, open.game.id)).game.phase).toBe("waiting");
+    now += 1;
+    expect(await service.openRooms()).toEqual([]);
+    await expect(service.invitation(white, open.game.id)).rejects.toMatchObject({
+      code: "ROOM_CLOSED",
+    });
+    const expired = await service.view(white, open.game.id);
+    expect(expired.game.closure).toEqual({ reason: "expired", closedAt: now });
+    expect(expired.game.revision).toBe(1);
+    expect(expired.game.outcome).toBeNull();
+    expect((await service.view(white, privateRoom.game.id)).game.phase).toBe("waiting");
+    expect(await service.expireDue()).toBeUndefined();
+    expect((await service.view(white, open.game.id)).game.revision).toBe(1);
+  });
+
+  it.each(["public", "invitation"] as const)(
+    "rejects a late %s join and commits the recovered closure even with a legacy long-lived invite",
+    async (route) => {
+      const open = await service.create(white, {
+        rulesetId: "standard",
+        color: "white",
+        timeControl: "untimed",
+        visibility: "open",
+      });
+      await database.pool.query(
+        "UPDATE invitations SET expires_at=expires_at+interval '23 hours' WHERE match_id=$1",
+        [open.game.id],
+      );
+      now += OPEN_ROOM_LIFETIME_MS;
+      await expect(
+        route === "public"
+          ? service.joinOpen(black, open.game.id)
+          : service.join(black, open.invitation.token),
+      ).rejects.toMatchObject({
+        code: route === "public" ? "ROOM_UNAVAILABLE" : "INVITATION_UNAVAILABLE",
+      });
+      const expired = await service.view(white, open.game.id);
+      expect(expired.game).toMatchObject({
+        phase: "finished",
+        revision: 1,
+        outcome: null,
+        closure: { reason: "expired", closedAt: now },
+      });
+      expect(await database.transaction((tx) => tx.listSeats(open.game.id))).toHaveLength(1);
+      expect(await database.transaction((tx) => tx.listEvents(open.game.id, 0))).toHaveLength(1);
+      expect(
+        (await database.transaction((tx) => tx.getInvitation(tokenHash(open.invitation.token))))
+          ?.consumedAt,
+      ).toBeNull();
+    },
+  );
+
+  it("expires a room during a stale close command without rolling back or storing an accepted close receipt", async () => {
+    const created = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    const close = command(0, { type: "close-room" });
+    now += OPEN_ROOM_LIFETIME_MS;
+    await expect(service.command(white, created.game.id, close)).rejects.toMatchObject({
+      code: "ROOM_CLOSED",
+    });
+    const view = await service.view(white, created.game.id);
+    expect(view.game.closure?.reason).toBe("expired");
+    expect(
+      await database.transaction((tx) => tx.getReceipt(created.game.id, white.id, close.commandId)),
+    ).toBeNull();
+    expect(
+      (await database.transaction((tx) => tx.listEvents(created.game.id, 0))).map(
+        (event) => event.type,
+      ),
+    ).toEqual(["room-expired"]);
+  });
+
+  it("recovers waiting deadlines across restart and ignores active open games after one hour", async () => {
+    const active = await start({ visibility: "open" });
+    const waiting = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    now += OPEN_ROOM_LIFETIME_MS;
+    await database.close();
+    database = new Database(connectionString, { options: `-c search_path=${schema}` });
+    service = new GameService(database, () => now);
+    await service.expireDue();
+    expect((await service.publicView(waiting.game.id))?.closure).toEqual({
+      reason: "expired",
+      closedAt: now,
+    });
+    expect((await service.view(white, active.game.id)).game.phase).toBe("active");
+    expect((await service.view(white, active.game.id)).game).not.toHaveProperty("closure");
+    await service.expireDue();
+    expect(await database.transaction((tx) => tx.listEvents(waiting.game.id, 0))).toHaveLength(1);
+  });
+
+  it("excludes elapsed open rooms from capacity before the worker has processed them", async () => {
+    for (let index = 0; index < 10; index += 1)
+      await service.create(white, {
+        rulesetId: "standard",
+        color: "white",
+        timeControl: "untimed",
+        visibility: "open",
+      });
+    now += OPEN_ROOM_LIFETIME_MS;
+    const privateRoom = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+    });
+    expect(privateRoom.game.phase).toBe("waiting");
+    const guestRoom = await service.create(black, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+    });
+    expect((await service.join(white, guestRoom.invitation.token)).game.phase).toBe("active");
+  });
+
+  it.each(["public", "invitation"] as const)(
+    "rechecks the one-hour deadline after a %s join waits for guest capacity",
+    async (route) => {
+      const created = await service.create(white, {
+        rulesetId: "standard",
+        color: "white",
+        timeControl: "5+0",
+        visibility: "open",
+      });
+      now += OPEN_ROOM_LIFETIME_MS - 1;
+      let signalLocked: () => void = () => undefined;
+      let releaseLock: () => void = () => undefined;
+      const locked = new Promise<void>((resolve) => {
+        signalLocked = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        releaseLock = resolve;
+      });
+      const holder = database.transaction(async (tx) => {
+        await tx.client.query("SELECT id FROM player_sessions WHERE id=$1 FOR UPDATE", [black.id]);
+        signalLocked();
+        await released;
+      });
+      await locked;
+      const join =
+        route === "public"
+          ? service.joinOpen(black, created.game.id)
+          : service.join(black, created.invitation.token);
+      const rejected = expect(join).rejects.toMatchObject({
+        code: route === "public" ? "ROOM_UNAVAILABLE" : "INVITATION_UNAVAILABLE",
+      });
+      try {
+        await expect
+          .poll(
+            async () => {
+              const result = await database.pool.query<{ blocked: boolean }>(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT expires_at FROM player_sessions%') AS blocked",
+              );
+              return result.rows[0]?.blocked;
+            },
+            { timeout: 2000, interval: 10 },
+          )
+          .toBe(true);
+        now += 1;
+      } finally {
+        releaseLock();
+        await holder;
+      }
+      await rejected;
+      const view = await service.view(white, created.game.id);
+      expect(view.game).toMatchObject({
+        phase: "finished",
+        revision: 1,
+        closure: { reason: "expired", closedAt: now },
+        outcome: null,
+      });
+      expect(view.game.clocks?.turnStartedAt).toBeNull();
+      expect(await database.transaction((tx) => tx.listSeats(created.game.id))).toHaveLength(1);
+      expect(
+        (await database.transaction((tx) => tx.getInvitation(tokenHash(created.invitation.token))))
+          ?.consumedAt,
+      ).toBeNull();
+    },
+  );
+
+  it("invalidates a renewed invitation when invitation rotation races host closure", async () => {
+    const created = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+    });
+    const results = await Promise.allSettled([
+      service.invitation(white, created.game.id),
+      service.command(white, created.game.id, command(0, { type: "close-room" })),
+    ]);
+    expect(results[1]?.status).toBe("fulfilled");
+    const renewed = results[0];
+    if (renewed?.status === "fulfilled")
+      await expect(service.join(black, renewed.value.token)).rejects.toMatchObject({
+        code: "INVITATION_UNAVAILABLE",
+      });
+    const invitations = await database.pool.query<{ expires_at: Date; consumed_at: Date | null }>(
+      "SELECT expires_at,consumed_at FROM invitations WHERE match_id=$1",
+      [created.game.id],
+    );
+    expect(invitations.rows).toHaveLength(1);
+    expect(invitations.rows[0]?.expires_at.getTime()).toBe(now);
+    expect(invitations.rows[0]?.consumed_at).toBeNull();
+  });
+
+  it("bounds expiration to a hundred candidates per pass and recovers the remaining room next time", async () => {
+    const created = await service.create(white, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    await database.transaction(async (tx) => {
+      const template = await tx.getGame(created.game.id);
+      if (!template) throw new Error("Room is missing.");
+      for (let index = 0; index < 100; index += 1) {
+        const game = { ...template, id: randomUUID() };
+        await tx.createGame(game);
+        await tx.addSeat({ gameId: game.id, color: "white", sessionId: white.id });
+      }
+    });
+    now += OPEN_ROOM_LIFETIME_MS;
+    await service.expireDue();
+    const statuses = async () =>
+      (
+        await database.pool.query<{ status: string; count: string }>(
+          "SELECT status,count(*)::text FROM matches GROUP BY status ORDER BY status",
+        )
+      ).rows;
+    expect(await statuses()).toEqual([
+      { status: "finished", count: "100" },
+      { status: "waiting", count: "1" },
+    ]);
+    await service.expireDue();
+    expect(await statuses()).toEqual([{ status: "finished", count: "101" }]);
+  });
+
+  it.each(["public-view", "pgn"] as const)(
+    "recovers a waiting-room expiration when accessed through %s without a worker",
+    async (route) => {
+      const created = await service.create(white, {
+        rulesetId: "standard",
+        color: "white",
+        timeControl: "untimed",
+        visibility: "open",
+      });
+      now += OPEN_ROOM_LIFETIME_MS;
+      if (route === "public-view")
+        expect((await service.publicView(created.game.id))?.closure?.reason).toBe("expired");
+      else
+        await expect(service.pgn(white, created.game.id)).rejects.toMatchObject({
+          code: "ROOM_CLOSED",
+        });
+      expect((await database.transaction((tx) => tx.getGame(created.game.id)))?.status).toBe(
+        "finished",
+      );
+    },
+  );
 
   it("renames the same guest identity without changing match state, clocks or saved acknowledgements", async () => {
     const started = await start({ timeControl: "10+5" });
@@ -209,7 +622,7 @@ describe("durable game application", () => {
         timeControl: "10+5",
         catchess: { white: 80, black: -30 },
         createdAt: now,
-        expiresAt: now + 24 * 60 * 60 * 1000,
+        expiresAt: now + OPEN_ROOM_LIFETIME_MS,
       },
     ]);
     expect(available.game.visibility).toBe("open");
@@ -366,8 +779,9 @@ describe("durable game application", () => {
     }
     await rejected;
     const stored = await database.transaction((tx) => tx.getGame(created.game.id));
-    expect(stored?.status).toBe("waiting");
-    expect(stored?.revision).toBe(0);
+    expect(stored?.status).toBe("finished");
+    expect(stored?.revision).toBe(1);
+    expect(stored?.lifecycle.closure).toEqual({ reason: "expired", closedAt: now });
     expect(await database.transaction((tx) => tx.listSeats(created.game.id))).toHaveLength(1);
     expect(
       (await database.transaction((tx) => tx.getInvitation(tokenHash(created.invitation.token))))
@@ -796,7 +1210,7 @@ describe("durable game application", () => {
     });
   });
 
-  it("bounds open rooms and removes expired waiting rooms while retaining an active game", async () => {
+  it("bounds rooms and retains expired waiting closures while retaining an active game", async () => {
     const active = await start();
     const waiting = [];
     for (let count = 0; count < 9; count += 1) {
@@ -817,12 +1231,20 @@ describe("durable game application", () => {
       "UPDATE matches SET created_at=clock_timestamp()-interval '25 hours' WHERE id=$1",
       [expired.game.id],
     );
+    await service.expireDue();
     await service.cleanup();
     await database.transaction(async (tx) => {
-      expect(await tx.getGame(expired.game.id)).toBeNull();
+      expect((await tx.getGame(expired.game.id))?.lifecycle.closure).toEqual({
+        reason: "expired",
+        closedAt: now,
+      });
       expect((await tx.getGame(active.game.id))?.status).toBe("active");
-      expect(await tx.getInvitation(tokenHash(expired.invitation.token))).toBeNull();
-      expect(await tx.listEvents(expired.game.id, -1)).toEqual([]);
+      const invitation = await tx.getInvitation(tokenHash(expired.invitation.token));
+      expect(invitation?.consumedAt).toBeNull();
+      expect(invitation?.expiresAt).toBe(now);
+      expect((await tx.listEvents(expired.game.id, 0)).map((event) => event.type)).toEqual([
+        "room-expired",
+      ]);
     });
     expect(
       (
@@ -967,8 +1389,9 @@ describe("durable game application", () => {
     });
     await database.transaction(async (tx) => {
       const retained = await tx.getGame(created.game.id);
-      expect(retained?.status).toBe("waiting");
-      expect(retained?.revision).toBe(0);
+      expect(retained?.status).toBe("finished");
+      expect(retained?.revision).toBe(1);
+      expect(retained?.lifecycle.closure).toEqual({ reason: "expired", closedAt: now });
       expect(await tx.listSeats(created.game.id)).toHaveLength(1);
       expect((await tx.getInvitation(tokenHash(invitation.token)))?.consumedAt).toBeNull();
     });

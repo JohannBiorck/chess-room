@@ -9,6 +9,7 @@ import {
   type GameView,
   gameViewSchema,
   MAX_OPEN_ROOMS,
+  OPEN_ROOM_LIFETIME_MS,
   type OpenRoom,
   type PublicGame,
   type SessionView,
@@ -26,7 +27,7 @@ import {
   inspectEngine,
   oppositeColor,
 } from "@chess-room/game-core";
-import type { Database, Transaction } from "../storage/database.js";
+import { type Database, type Transaction, waitingDeadlineSql } from "../storage/database.js";
 import type { GameRecord, JsonObject, SessionRecord } from "../storage/records.js";
 import { ApplicationError } from "./errors.js";
 
@@ -43,6 +44,7 @@ interface Lifecycle {
   drawOffer: Color | null;
   rematchRequested: Color[];
   rematchGameId: string | null;
+  closure?: NonNullable<PublicGame["closure"]>;
 }
 const lifecycle = (game: GameRecord) => game.lifecycle as unknown as Lifecycle;
 
@@ -144,12 +146,12 @@ export class GameService {
          JOIN match_seats s ON s.match_id=m.id
          JOIN player_sessions p ON p.id=s.session_id
          WHERE m.status='waiting' AND m.rules_config->>'visibility'='open'
-           AND m.created_at>to_timestamp($1/1000.0)-interval '24 hours'
-           AND p.expires_at>to_timestamp($1/1000.0)
+           AND m.created_at>to_timestamp(($1::bigint-$3::bigint)/1000.0)
+           AND p.expires_at>to_timestamp($1::bigint/1000.0)
            AND NOT EXISTS (SELECT 1 FROM match_seats other
              WHERE other.match_id=m.id AND other.color<>s.color)
          ORDER BY m.created_at DESC,m.id LIMIT $2`,
-        [now, MAX_OPEN_ROOMS],
+        [now, MAX_OPEN_ROOMS, OPEN_ROOM_LIFETIME_MS],
       );
       return result.rows.map((row) => ({
         id: row.id,
@@ -161,7 +163,7 @@ export class GameService {
           : {}),
         createdAt: row.created_at.getTime(),
         expiresAt: Math.min(
-          row.created_at.getTime() + INVITATION_LIFETIME,
+          row.created_at.getTime() + OPEN_ROOM_LIFETIME_MS,
           row.expires_at.getTime(),
         ),
       }));
@@ -192,8 +194,10 @@ export class GameService {
         401,
       );
     const result = await tx.client.query<{ count: string }>(
-      "SELECT count(*) FROM matches m JOIN match_seats s ON s.match_id=m.id WHERE s.session_id=$1 AND (m.status='active' OR (m.status='waiting' AND m.created_at>clock_timestamp()-interval '24 hours'))",
-      [sessionId],
+      `SELECT count(*) FROM matches m JOIN match_seats s ON s.match_id=m.id
+       WHERE s.session_id=$1 AND (m.status='active' OR
+         (m.status='waiting' AND ${waitingDeadlineSql}>$2))`,
+      [sessionId, await this.now(tx)],
     );
     if (Number(result.rows[0]?.count) >= 10)
       throw new ApplicationError(
@@ -237,6 +241,7 @@ export class GameService {
           }
         : null,
       outcome: life.outcome,
+      ...(life.closure ? { closure: life.closure } : {}),
       drawOffer: life.drawOffer,
       rematchRequested: life.rematchRequested,
       rematchGameId: life.rematchGameId,
@@ -325,7 +330,48 @@ export class GameService {
     life.deadlineAt = null;
   }
 
+  private async waitingDeadline(tx: Transaction, game: GameRecord): Promise<number> {
+    const owner = await tx.client.query<{ expires_at: Date | null }>(
+      `SELECT min(p.expires_at) AS expires_at FROM match_seats s
+       JOIN player_sessions p ON p.id=s.session_id WHERE s.match_id=$1`,
+      [game.id],
+    );
+    return Math.min(
+      game.createdAt +
+        (game.rulesConfig.visibility === "open" ? OPEN_ROOM_LIFETIME_MS : INVITATION_LIFETIME),
+      owner.rows[0]?.expires_at?.getTime() ?? Infinity,
+    );
+  }
+
+  private async close(
+    tx: Transaction,
+    game: GameRecord,
+    reason: NonNullable<PublicGame["closure"]>["reason"],
+    now: number,
+  ) {
+    const life = lifecycle(game);
+    game.status = "finished";
+    life.closure = { reason, closedAt: now };
+    life.outcome = null;
+    life.drawOffer = null;
+    life.turnStartedAt = null;
+    life.deadlineAt = null;
+    life.rematchRequested = [];
+    life.rematchGameId = null;
+    // Keep the original invitation record for diagnostics without fabricating a join.
+    await tx.client.query(
+      `UPDATE invitations SET expires_at=LEAST(expires_at,to_timestamp($2/1000.0))
+       WHERE match_id=$1 AND consumed_at IS NULL`,
+      [game.id, now],
+    );
+  }
+
   private async expire(tx: Transaction, game: GameRecord, now: number): Promise<boolean> {
+    if (game.status === "waiting" && now >= (await this.waitingDeadline(tx, game))) {
+      await this.close(tx, game, "expired", now);
+      await this.persist(tx, game, "room-expired", now);
+      return true;
+    }
     const life = lifecycle(game);
     if (game.status !== "active" || life.deadlineAt === null || now < life.deadlineAt) return false;
     const state = engineStateSchema.parse(game.engineState);
@@ -345,19 +391,9 @@ export class GameService {
 
   async create(actor: SessionRecord, config: CreateGame) {
     return this.database.transaction(async (tx) => {
-      await tx.client.query("SELECT id FROM player_sessions WHERE id=$1 FOR UPDATE", [actor.id]);
       if (!(await tx.getSession(actor.tokenHash)))
         throw new ApplicationError("SESSION_REQUIRED", "Your guest session has expired.", 401);
-      const count = await tx.client.query<{ count: string }>(
-        "SELECT count(*) FROM matches m JOIN match_seats s ON s.match_id=m.id WHERE s.session_id=$1 AND (m.status='active' OR (m.status='waiting' AND m.created_at>clock_timestamp()-interval '24 hours'))",
-        [actor.id],
-      );
-      if (Number(count.rows[0]?.count) >= 10)
-        throw new ApplicationError(
-          "ROOM_LIMIT",
-          "Finish an existing game before creating another.",
-          429,
-        );
+      await this.requireCapacity(tx, actor.id);
       const now = await this.now(tx);
       const color = config.color === "random" ? (randomInt(2) ? "white" : "black") : config.color;
       const settings = config.catchess ?? { host: 25, guest: 25 };
@@ -392,7 +428,8 @@ export class GameService {
     );
     const expiresAt = Math.min(
       now + INVITATION_LIFETIME,
-      game.createdAt + INVITATION_LIFETIME,
+      game.createdAt +
+        (game.rulesConfig.visibility === "open" ? OPEN_ROOM_LIFETIME_MS : INVITATION_LIFETIME),
       owner.rows[0]?.expires_at.getTime() ?? now,
     );
     if (expiresAt <= now)
@@ -417,25 +454,32 @@ export class GameService {
   }
 
   async invitation(actor: SessionRecord, id: string) {
-    return this.database.transaction(async (tx) => {
+    const result = await this.database.transaction(async (tx) => {
       const game = await tx.lockGame(id);
       if (!game) throw new ApplicationError("NOT_FOUND", "Game not found.", 404);
       const seat = await this.requireSeat(tx, id, actor);
-      if (game.status !== "waiting")
-        throw new ApplicationError("GAME_STARTED", "This game already has two players.", 409);
       const now = await this.now(tx);
-      if (game.createdAt + INVITATION_LIFETIME <= now)
-        throw new ApplicationError(
-          "ROOM_EXPIRED",
-          "This room expired. Please create another.",
-          410,
-        );
-      return this.issue(tx, game, oppositeColor(seat), now);
+      await this.expire(tx, game, now);
+      if (lifecycle(game).closure)
+        return {
+          error: new ApplicationError(
+            "ROOM_CLOSED",
+            "This room is closed. Please create another.",
+            410,
+          ),
+        };
+      if (game.status !== "waiting")
+        return {
+          error: new ApplicationError("GAME_STARTED", "This game already has two players.", 409),
+        };
+      return { invitation: await this.issue(tx, game, oppositeColor(seat), now) };
     });
+    if (result.error) throw result.error;
+    return result.invitation;
   }
 
   async join(actor: SessionRecord, token: string): Promise<GameView> {
-    return this.database.transaction(async (tx) => {
+    const result = await this.database.transaction(async (tx) => {
       const hash = tokenHash(token);
       const candidate = await tx.getInvitation(hash);
       if (!candidate)
@@ -447,7 +491,7 @@ export class GameService {
       const game = await tx.lockGame(candidate.gameId);
       if (!game) throw new ApplicationError("NOT_FOUND", "Game not found.", 404);
       const invitation = await tx.getInvitation(hash, true);
-      const now = await this.now(tx);
+      let now = await this.now(tx);
       if (!(await tx.getSession(actor.tokenHash)))
         throw new ApplicationError("SESSION_REQUIRED", "Your guest session has expired.", 401);
       if (!invitation)
@@ -456,19 +500,23 @@ export class GameService {
           "Invitation is invalid or has expired.",
           404,
         );
-      if (invitation.consumedBy === actor.id)
-        return { game: await this.project(tx, game, now), seat: invitation.color };
-      if (
-        game.status !== "waiting" ||
-        invitation.consumedAt !== null ||
-        invitation.expiresAt <= now ||
-        game.createdAt + INVITATION_LIFETIME <= now
-      )
-        throw new ApplicationError(
+      const unavailable = () =>
+        new ApplicationError(
           "INVITATION_UNAVAILABLE",
           "This invitation has expired or was already used.",
           409,
         );
+      // Returning the error out of the transaction commits any recovered closure.
+      const expired = await this.expire(tx, game, now);
+      if (invitation.consumedBy === actor.id)
+        return { view: { game: await this.project(tx, game, now), seat: invitation.color } };
+      if (expired) return { error: unavailable() };
+      if (
+        game.status !== "waiting" ||
+        invitation.consumedAt !== null ||
+        invitation.expiresAt <= now
+      )
+        throw unavailable();
       if ((await tx.listSeats(game.id)).some((seat) => seat.sessionId === actor.id))
         throw new ApplicationError(
           "OWN_INVITATION",
@@ -476,21 +524,21 @@ export class GameService {
           409,
         );
       await this.requireCapacity(tx, actor.id);
-      if (!(await tx.consumeInvitation(hash, actor.id)))
-        throw new ApplicationError(
-          "INVITATION_UNAVAILABLE",
-          "This invitation has expired or was already used.",
-          409,
-        );
+      now = await this.now(tx);
+      if (await this.expire(tx, game, now)) return { error: unavailable() };
+      if (invitation.expiresAt <= now || !(await tx.consumeInvitation(hash, actor.id)))
+        throw unavailable();
       await tx.addSeat({ gameId: game.id, color: invitation.color, sessionId: actor.id });
       this.start(game, now);
       await this.persist(tx, game, "joined", now);
-      return { game: await this.project(tx, game, now), seat: invitation.color };
+      return { view: { game: await this.project(tx, game, now), seat: invitation.color } };
     });
+    if (result.error) throw result.error;
+    return result.view;
   }
 
   async joinOpen(actor: SessionRecord, id: string): Promise<GameView> {
-    return this.database.transaction(async (tx) => {
+    const result = await this.database.transaction(async (tx) => {
       const game = await tx.lockGame(id);
       const unavailable = () =>
         new ApplicationError(
@@ -504,36 +552,26 @@ export class GameService {
       const seats = await tx.listSeats(id);
       const existing = seats.find((seat) => seat.sessionId === actor.id);
       let now = await this.now(tx);
+      const expired = await this.expire(tx, game, now);
       // A lost join acknowledgement remains recoverable once this room has started.
-      if (existing && game.status !== "waiting")
-        return { game: await this.project(tx, game, now), seat: existing.color };
-      if (existing)
+      // A cancelled host room never acknowledges a join that did not happen.
+      if (existing && game.status !== "waiting" && !lifecycle(game).closure)
+        return { view: { game: await this.project(tx, game, now), seat: existing.color } };
+      if (expired) return { error: unavailable() };
+      if (existing && game.status === "waiting")
         throw new ApplicationError(
           "OWN_ROOM",
           "You already host this room. Wait for another player.",
           409,
         );
-      if (
-        game.status !== "waiting" ||
-        seats.length !== 1 ||
-        game.createdAt + INVITATION_LIFETIME <= now
-      )
-        throw unavailable();
+      if (game.status !== "waiting" || seats.length !== 1) throw unavailable();
       const host = seats[0];
       if (!host) throw unavailable();
       await this.requireCapacity(tx, actor.id);
-      // Capacity can wait on the guest's session lock. Evaluate expiry and start
-      // the clock only after that wait, while still owning the match lock.
+      // Capacity can wait on the guest's session lock. Reevaluate the room's
+      // lifetime and host expiry and start the clock only after that wait.
       now = await this.now(tx);
-      const owner = await tx.client.query<{ expires_at: Date }>(
-        "SELECT expires_at FROM player_sessions WHERE id=$1",
-        [host.sessionId],
-      );
-      if (
-        game.createdAt + INVITATION_LIFETIME <= now ||
-        (owner.rows[0]?.expires_at.getTime() ?? 0) <= now
-      )
-        throw unavailable();
+      if (await this.expire(tx, game, now)) return { error: unavailable() };
       const seat = oppositeColor(host.color);
       await tx.addSeat({ gameId: id, color: seat, sessionId: actor.id });
       // The same match lock serializes invitation and public joins. Consuming its
@@ -544,8 +582,10 @@ export class GameService {
       );
       this.start(game, now);
       await this.persist(tx, game, "joined", now);
-      return { game: await this.project(tx, game, now), seat };
+      return { view: { game: await this.project(tx, game, now), seat } };
     });
+    if (result.error) throw result.error;
+    return result.view;
   }
 
   async view(actor: SessionRecord, id: string): Promise<GameView> {
@@ -561,8 +601,11 @@ export class GameService {
 
   async publicView(id: string): Promise<PublicGame | null> {
     return this.database.transaction(async (tx) => {
-      const game = await tx.getGame(id);
-      return game ? this.project(tx, game, await this.now(tx)) : null;
+      const game = await tx.lockGame(id);
+      if (!game) return null;
+      const now = await this.now(tx);
+      await this.expire(tx, game, now);
+      return this.project(tx, game, now);
     });
   }
 
@@ -585,7 +628,9 @@ export class GameService {
       const now = await this.now(tx);
       if (await this.expire(tx, game, now))
         return {
-          error: new ApplicationError("GAME_FINISHED", "The clock expired. Refresh the game.", 409),
+          error: lifecycle(game).closure
+            ? new ApplicationError("ROOM_CLOSED", "This room expired. Please create another.", 409)
+            : new ApplicationError("GAME_FINISHED", "The clock expired. Refresh the game.", 409),
         };
       if (game.revision !== command.expectedRevision)
         throw new ApplicationError(
@@ -631,8 +676,18 @@ export class GameService {
     const action = command.action;
     const state = engineStateSchema.parse(game.engineState);
     const position = inspectEngine(state);
+    if (action.type === "close-room") {
+      if (game.status !== "waiting" || (await tx.listSeats(game.id)).length !== 1)
+        throw new ApplicationError(
+          "CLOSE_UNAVAILABLE",
+          "Only a room waiting for an opponent can be closed.",
+          409,
+        );
+      await this.close(tx, game, "host-closed", now);
+      return;
+    }
     if (action.type === "request-rematch" || action.type === "accept-rematch") {
-      if (game.status !== "finished" || life.rematchGameId)
+      if (game.status !== "finished" || life.closure || !life.outcome || life.rematchGameId)
         throw new ApplicationError("REMATCH_UNAVAILABLE", "A rematch is unavailable.", 409);
       if (action.type === "request-rematch") {
         if (life.rematchRequested.includes(seat))
@@ -740,26 +795,32 @@ export class GameService {
   }
 
   async pgn(actor: SessionRecord, id: string): Promise<string> {
-    return this.database.transaction(async (tx) => {
-      const game = await tx.getGame(id);
+    const result = await this.database.transaction(async (tx) => {
+      const game = await tx.lockGame(id);
       if (!game) throw new ApplicationError("NOT_FOUND", "Game not found.", 404);
       await this.requireSeat(tx, id, actor);
-      return exportPgn(
-        engineStateSchema.parse(game.engineState),
-        lifecycle(game).outcome ?? undefined,
-      );
+      await this.expire(tx, game, await this.now(tx));
+      if (lifecycle(game).closure)
+        return {
+          error: new ApplicationError(
+            "ROOM_CLOSED",
+            "This room closed before a game was played.",
+            409,
+          ),
+        };
+      return {
+        pgn: exportPgn(
+          engineStateSchema.parse(game.engineState),
+          lifecycle(game).outcome ?? undefined,
+        ),
+      };
     });
+    if (result.error) throw result.error;
+    return result.pgn;
   }
 
   async expireDue(): Promise<void> {
-    const ids = this.testNow
-      ? (
-          await this.database.pool.query<{ id: string }>(
-            "SELECT id FROM matches WHERE status='active' AND (lifecycle->>'deadlineAt')::bigint <= $1 LIMIT 100",
-            [this.testNow()],
-          )
-        ).rows.map((row) => row.id)
-      : await this.database.transaction((tx) => tx.findGamesDue(100));
+    const ids = await this.database.transaction((tx) => tx.findGamesDue(100, this.testNow?.()));
     for (const id of ids)
       await this.database.transaction(async (tx) => {
         const game = await tx.lockGame(id);
@@ -782,8 +843,7 @@ export class GameService {
         }
       }
       await tx.client.query(`DELETE FROM matches WHERE id IN (
-        SELECT id FROM matches WHERE (status='waiting' AND created_at<clock_timestamp()-interval '24 hours')
-          OR (status='finished' AND updated_at<clock_timestamp()-interval '30 days')
+        SELECT id FROM matches WHERE status='finished' AND updated_at<clock_timestamp()-interval '30 days'
         LIMIT 100 FOR UPDATE SKIP LOCKED)`);
       await tx.client.query(`DELETE FROM player_sessions WHERE id IN (
         SELECT id FROM player_sessions p WHERE expires_at<clock_timestamp()

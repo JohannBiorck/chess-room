@@ -99,6 +99,7 @@ export function useChessRoom() {
     else if (arrivals.length > 0)
       setLiveCatEffects((effects) => [...effects, ...arrivals].slice(-24));
     viewRef.current = next;
+    if (next.game.closure) setInvitation(null);
     setPendingMove((pending) =>
       pending && (pending.gameId !== next.game.id || next.game.revision > pending.revision)
         ? null
@@ -480,7 +481,7 @@ export function useChessRoom() {
 
   async function command(action: GameAction) {
     const current = viewRef.current;
-    if (!current) return;
+    if (!current) return false;
     const pending: PendingCommand = {
       gameId: current.game.id,
       command: {
@@ -490,7 +491,7 @@ export function useChessRoom() {
         action,
       },
     };
-    await operation(() => execute(pending));
+    return operation(() => execute(pending));
   }
 
   async function retryCommand() {
@@ -529,6 +530,7 @@ export function useChessRoom() {
   }
 
   function lobby() {
+    if (viewRef.current?.game.closure) rememberGame(null);
     viewRef.current = null;
     setView(null);
     setPendingMove(null);

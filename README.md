@@ -10,6 +10,10 @@ show the host's name, game mode, clock and cat settings on the home page;
 the first visitor to join takes the available seat. Private rooms are the
 default and never appear in that list.
 
+Hosts can close a waiting room using **Close room**, with a confirmation before
+its invitation and open seat become unavailable. An open room closes after one
+hour without an opponent. Games that have already started continue normally.
+
 In Catchess, each player has their own cat. Adjust each cat's slider in the
 lobby: a positive percentage can add a pawn on that player's half of the board;
 a negative percentage can remove one of their pawns. The cat acts after its
@@ -55,10 +59,11 @@ See [operations](docs/operations.md) for configuration and
 [free hosting](docs/hosting.md) for the Render/Neon deployment.
 
 Keep the guest cookie to return to your seat. Losing it loses access; a guest
-name cannot recover it. Sessions last 30 days. Waiting rooms expire after
-24 hours; invitations last up to 24 hours, bounded by the host session.
-Finished games are retained for 30 days. Timed games
-continue during disconnection and server downtime. Read the exact
+name cannot recover it. Sessions last 30 days. Open waiting rooms expire after
+one hour and private waiting rooms after 24 hours, or sooner when the host
+session expires. Invitations share their room's deadline; rotating a link does
+not extend it. Finished games and closed rooms are retained for 30 days. Timed
+games continue during disconnection and server downtime. Read the exact
 [rules and adjudication policy](docs/rules.md).
 
 Stop development with Ctrl+C. `npm run db:down` preserves the database volume.

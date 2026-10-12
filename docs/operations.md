@@ -58,9 +58,10 @@ The HTTPS configuration uses a Secure, HttpOnly, SameSite cookie with the
 `__Host-` prefix and no Domain attribute. Guest identity is stored in that
 cookie. Losing it or reaching the fixed 30-day expiry loses access to the old
 seat; display names do not restore authorization. Invitation tokens are
-redeemed from the URL fragment and expire within 24 hours, or sooner when the
-host session or waiting room expires. Keep request bodies,
-cookies, invitation fragments and database backups out of access logs.
+redeemed from the URL fragment and expire with their room: one hour for open
+rooms, 24 hours for private rooms, or sooner when the host session expires.
+Keep request bodies, cookies, invitation fragments and database backups out of
+access logs.
 
 Changing a display name updates that same guest identity; it does not renew
 the session or recover another seat. Open rooms deliberately expose the host
@@ -68,6 +69,12 @@ name and game settings to visitors through `GET /api/lobbies`. Only waiting
 rooms with an unexpired host are listed, with a maximum of 50. Private rooms
 remain unlisted. Public joins still require a valid guest cookie and the
 normal origin, rate and room-capacity checks.
+
+Hosts can close waiting rooms through the normal identified command endpoint.
+Closing and joining serialize on the match lock, so an active game cannot be
+cancelled as a waiting room. A closed room retains its explanation on reload
+and has no chess result, rematch or PGN export. Closing expires outstanding
+invitations and releases the host's room capacity.
 
 Place the backend behind a reverse proxy that terminates HTTPS, forwards
 `/api/` and `/socket.io/`, and supports HTTP/1.1 WebSocket upgrades. Pass the
@@ -104,8 +111,8 @@ The exact draw and timeout policies are documented in [rules](rules.md).
 
 The background scheduler polls revisions at 250 ms only while game subscribers
 are connected. Without subscribers it waits for the nearest durable clock
-deadline or cleanup deadline, with an hourly upper bound. Mutations and
-subscription changes wake it immediately. Idle database connections expire
+deadline, waiting-room expiry or cleanup deadline, with an hourly upper bound.
+Mutations and subscription changes wake it immediately. Idle database connections expire
 through the pool's idle timeout, allowing a serverless database to suspend
 between scheduled work. Closing unused game tabs avoids retaining active
 subscriptions; continuous activity still consumes the provider's free quota.
@@ -125,8 +132,8 @@ hourly:
 
 | Material | Eligibility | Maximum per cleanup batch |
 | --- | --- | ---: |
-| Waiting rooms | More than 24 hours since creation | Combined 100 rooms/games |
-| Finished games | More than 30 days since last update | Combined 100 rooms/games |
+| Waiting rooms become closed | Open: one hour; private: 24 hours; earlier host expiry | 100 per deadline pass |
+| Finished games and closed rooms | More than 30 days since last update | 100 rooms/games |
 | Expired sessions | No remaining seat, consumed invitation or receipt reference | 100 |
 | Rate-limit keys | Window older than 24 hours | 1,000 |
 
@@ -134,6 +141,9 @@ Deleting a game also removes its seats, invitations, receipts, events and
 outbox rows through database constraints. Rotating an invitation does not
 extend a waiting room's lifetime. Cleanup is bounded and can lag behind a
 large backlog; monitor counts and tune scheduling from measured demand.
+Expired waiting rooms remain unjoinable and unlisted even if the worker has
+not yet persisted their closure. Startup and authenticated snapshots reconcile
+overdue rooms after a sleeping server wakes; no uptime pings are required.
 Active games are preserved while either participant has a valid session. When
 both sessions expire, a bounded worker pass locks and finishes the game as an
 abandoned draw with reason `session-expired`. It then follows the finished-game

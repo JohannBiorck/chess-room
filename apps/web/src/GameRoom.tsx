@@ -45,8 +45,9 @@ type GameRoomProps = {
   invitation: Invitation | null;
   receivedAt: number;
   busy: boolean;
+  commandError: string | null;
   connection: "connecting" | "connected" | "reconnecting";
-  onCommand: (action: GameAction) => Promise<void>;
+  onCommand: (action: GameAction) => Promise<boolean>;
   onReconnect: () => Promise<void>;
   onInvitation: () => Promise<void>;
   onRematch: () => Promise<void>;
@@ -60,6 +61,7 @@ export function GameRoom({
   invitation,
   receivedAt,
   busy,
+  commandError,
   connection,
   onCommand,
   onReconnect,
@@ -72,6 +74,9 @@ export function GameRoom({
   const [now, setNow] = useState(Date.now());
   const [promotion, setPromotion] = useState<MoveInput[] | null>(null);
   const [resigning, setResigning] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [closePending, setClosePending] = useState(false);
+  const [closeFailed, setCloseFailed] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const history = useRef<HTMLDivElement>(null);
@@ -95,6 +100,10 @@ export function GameRoom({
     }
   }, [game.phase]);
 
+  useEffect(() => {
+    if (game.phase !== "waiting") setClosing(false);
+  }, [game.phase]);
+
   const movesLength = game.position.moves.length;
   useEffect(() => {
     void movesLength;
@@ -110,6 +119,11 @@ export function GameRoom({
   const yourTurn = active && seat === game.position.turn;
   const canMove = yourTurn && !busy && connection === "connected";
   const opponent: Color = (seat ?? "white") === "white" ? "black" : "white";
+  const canCloseRoom =
+    game.phase === "waiting" &&
+    seat !== null &&
+    game.players[seat] !== null &&
+    game.players[opponent] === null;
   const incomingDraw = active && game.drawOffer !== null && game.drawOffer !== seat;
   const offeredDraw = active && game.drawOffer === seat && seat !== null;
   const ownRematch = seat !== null && game.rematchRequested.includes(seat);
@@ -178,6 +192,43 @@ export function GameRoom({
         </div>
         <Clock color={color} clocks={game.clocks} receivedAt={receivedAt} active={active} />
       </div>
+    );
+  }
+
+  if (game.closure) {
+    const expired = game.closure.reason === "expired";
+    const closedStatus = expired
+      ? openRoom
+        ? "Open room expired"
+        : "Room expired"
+      : "Room closed";
+    return (
+      <main id="main" tabIndex={-1} className="game-room">
+        <section className="closed-room" aria-labelledby="closed-room-heading">
+          <span className="closed-room-piece" aria-hidden="true">
+            <Piece type="n" color="black" />
+          </span>
+          <p className="eyebrow">THIS TABLE IS CLOSED</p>
+          <h1 id="closed-room-heading" aria-live="polite">
+            {closedStatus}
+          </h1>
+          <p>
+            {expired
+              ? openRoom
+                ? "This open room expired before another player joined. Open rooms close after 1 hour, or sooner if the host’s guest session expires."
+                : "This private room expired before the game started. Nobody can join it now. Create a new room whenever you’re ready."
+              : "You closed this room before the game started. Nobody can join it now."}
+          </p>
+          <button
+            type="button"
+            className="button button--primary"
+            disabled={busy}
+            onClick={onLobby}
+          >
+            Create another room
+          </button>
+        </section>
+      </main>
     );
   }
 
@@ -290,6 +341,11 @@ export function GameRoom({
                         : "Take a moment. Your friend is thinking."}
               </p>
             )}
+            {game.phase === "waiting" && openRoom && (
+              <p className="room-expiry">
+                If nobody joins, this room closes automatically 1 hour after creation.
+              </p>
+            )}
             {game.rulesetId === "three-check" && (
               <fieldset className="check-count">
                 <legend className="sr-only">Checks delivered</legend>
@@ -378,6 +434,22 @@ export function GameRoom({
                   </button>
                 </>
               )}
+            </section>
+          )}
+          {canCloseRoom && (
+            <section className="room-management" aria-label="Room management">
+              <button
+                type="button"
+                className="button button--danger button--wide"
+                disabled={busy}
+                onClick={() => {
+                  setCloseFailed(false);
+                  setClosing(true);
+                }}
+              >
+                Close room
+              </button>
+              <p>Close this waiting room to prevent anyone joining.</p>
             </section>
           )}
           {incomingDraw && (
@@ -595,6 +667,53 @@ export function GameRoom({
             </button>
             <button className="button" type="button" onClick={() => setResigning(false)}>
               Keep playing
+            </button>
+          </div>
+        </Modal>
+      )}
+      {closing && canCloseRoom && (
+        <Modal
+          title="Close this room?"
+          onClose={() => {
+            if (!busy && !closePending) setClosing(false);
+          }}
+        >
+          <p>
+            {openRoom
+              ? "This room will disappear from the open lobby, and nobody will be able to join. You can create another room afterwards."
+              : "Your invitation links will stop working, and nobody will be able to join. You can create another room afterwards."}
+          </p>
+          {closeFailed && (
+            <p className="field-error" role="alert">
+              {commandError ?? "We couldn’t close your room. Try again."}
+            </p>
+          )}
+          <div className="button-row">
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={busy || closePending}
+              onClick={() => setClosing(false)}
+            >
+              Keep room open
+            </button>
+            <button
+              className="button button--danger"
+              type="button"
+              disabled={busy || closePending}
+              onClick={async () => {
+                if (busy || closePending) return;
+                setClosePending(true);
+                setCloseFailed(false);
+                try {
+                  if (await onCommand({ type: "close-room" })) setClosing(false);
+                  else setCloseFailed(true);
+                } finally {
+                  setClosePending(false);
+                }
+              }}
+            >
+              {closePending ? "Closing room…" : "Close room"}
             </button>
           </div>
         </Modal>

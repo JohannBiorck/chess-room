@@ -1430,3 +1430,249 @@ test("a visitor with a stale open room sees a useful error after another player 
     await closePlayers(players);
   }
 });
+
+test("a host cancels room closure from the keyboard and safely retries a lost closing acknowledgement", async ({
+  browser,
+}, testInfo) => {
+  const players = await createRoom(browser, { mobile: true, time: "10+5" });
+  const commands: GameCommand[] = [];
+  const pattern = /\/api\/games\/[^/]+\/commands$/;
+  const handler = async (route: Route) => {
+    commands.push(gameCommandSchema.parse(route.request().postDataJSON()));
+    if (commands.length === 1) {
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      await route.abort("failed");
+    } else await route.continue();
+  };
+  await players.host.route(pattern, handler);
+  try {
+    const waiting = await readGame(players.host);
+    const close = players.host.getByRole("button", { name: "Close room", exact: true });
+    await close.focus();
+    await players.host.keyboard.press("Enter");
+    const confirmation = players.host.getByRole("dialog", {
+      name: "Close this room?",
+      exact: true,
+    });
+    await expect(confirmation).toBeVisible();
+    await players.host.screenshot({
+      path: testInfo.outputPath("close-room-confirmation-mobile.png"),
+      fullPage: true,
+    });
+    await players.host.keyboard.press("Escape");
+    await expect(confirmation).toHaveCount(0);
+    await expect(close).toBeFocused();
+    expect(commands).toHaveLength(0);
+    expect((await readGame(players.host)).game.phase).toBe("waiting");
+
+    await players.host.keyboard.press("Enter");
+    await confirmation.getByRole("button", { name: "Keep room open", exact: true }).click();
+    await expect(confirmation).toHaveCount(0);
+    await expect(close).toBeFocused();
+    expect(commands).toHaveLength(0);
+    await players.host.keyboard.press("Enter");
+    await confirmation.getByRole("button", { name: "Close room", exact: true }).focus();
+    await players.host.keyboard.press("Enter");
+    await expect(
+      players.host.getByRole("heading", { name: "Room closed", exact: true }),
+    ).toBeVisible();
+    await expect(
+      players.host.getByRole("button", { name: "Retry command", exact: true }),
+    ).toBeVisible();
+    await expect(confirmation).toHaveCount(0);
+    await expect(players.host.getByRole("table", { name: "Chess board" })).toHaveCount(0);
+    await expect(
+      players.host.getByRole("button", { name: "Request rematch", exact: true }),
+    ).toHaveCount(0);
+    await expect(players.host.getByRole("button", { name: "Resign", exact: true })).toHaveCount(0);
+    const closed = await readGame(players.host);
+    expect(closed.game.id).toBe(waiting.game.id);
+    expect(closed.game.revision).toBe(waiting.game.revision + 1);
+    expect(closed.game.closure).toEqual({ reason: "host-closed", closedAt: expect.any(Number) });
+    expect(closed.game.outcome).toBeNull();
+    expect(closed.game.position.outcome).toBeNull();
+    expect(closed.game.position.moves).toEqual([]);
+    expect(closed.game.clocks?.runningColor).toBeNull();
+
+    const acknowledgement = players.host.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        pattern.test(new URL(response.url()).pathname) &&
+        response.status() === 200,
+    );
+    await players.host.getByRole("button", { name: "Retry command", exact: true }).click();
+    expect(gameViewSchema.parse(await (await acknowledgement).json()).game.closure).toEqual(
+      closed.game.closure,
+    );
+    await expect(
+      players.host.getByRole("button", { name: "Retry command", exact: true }),
+    ).toHaveCount(0);
+    expect(commands).toHaveLength(2);
+    expect(commands[0]?.action).toEqual({ type: "close-room" });
+    expect(commands[1]).toEqual(commands[0]);
+    expect((await readGame(players.host)).game.revision).toBe(closed.game.revision);
+    await players.host.reload();
+    await expect(
+      players.host.getByRole("heading", { name: "Room closed", exact: true }),
+    ).toBeVisible();
+    expect((await readGame(players.host)).game.closure).toEqual(closed.game.closure);
+    expect(
+      await players.host.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    ).toBe(true);
+    await players.host.screenshot({
+      path: testInfo.outputPath("closed-private-room-mobile.png"),
+      fullPage: true,
+    });
+
+    await players.friend.goto(players.invitation);
+    await players.friend.getByLabel("Your display name").fill("Late friend");
+    await players.friend.getByRole("button", { name: "Join private room", exact: true }).click();
+    await expect(players.friend.getByRole("alert")).toContainText(
+      /invitation.*(expired|used)|closed/i,
+    );
+    await expect(players.friend.getByRole("table", { name: "Chess board" })).toHaveCount(0);
+    expect((await readGame(players.host)).game.players.black).toBeNull();
+    await players.host.getByRole("button", { name: "Create another room", exact: true }).click();
+    await expect(
+      players.host.getByRole("button", { name: "Create private room", exact: true }),
+    ).toBeVisible();
+    await expect(
+      players.host.getByRole("button", { name: "Return to previous room", exact: true }),
+    ).toHaveCount(0);
+    expect(
+      await players.host.evaluate(() => localStorage.getItem("chess-room.current-game")),
+    ).toBeNull();
+  } finally {
+    await players.host.unroute(pattern, handler);
+    await closePlayers(players);
+  }
+});
+
+test("closing an open room removes discovery and rejects a visitor holding its stale card", async ({
+  browser,
+}, testInfo) => {
+  const hostName = uniqueName("Closed");
+  const players = await createRoom(browser, { visibility: "open", hostName });
+  const pattern = /\/api\/lobbies$/;
+  try {
+    const waiting = await readGame(players.host);
+    await players.friend.goto("/");
+    const card = players.friend
+      .getByRole("region", { name: "Open rooms", exact: true })
+      .getByRole("listitem")
+      .filter({ hasText: hostName });
+    await expect(card).toHaveCount(1);
+    const listingResponse = await players.friend.request.get("/api/lobbies");
+    expect(listingResponse.status()).toBe(200);
+    const staleListing = JSON.stringify(openRoomsSchema.parse(await listingResponse.json()));
+    // Preserve a genuine older discovery snapshot without holding requests
+    // beyond the application's fetch deadline while the host closes the room.
+    await players.friend.route(pattern, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: staleListing }),
+    );
+    await players.host.getByRole("button", { name: "Close room", exact: true }).click();
+    const confirmation = players.host.getByRole("dialog", {
+      name: "Close this room?",
+      exact: true,
+    });
+    await expect(confirmation).toBeVisible();
+    await confirmation.getByRole("button", { name: "Close room", exact: true }).click();
+    await expect(
+      players.host.getByRole("heading", { name: "Room closed", exact: true }),
+    ).toBeVisible();
+    await expect(players.host.getByLabel("Private invitation link", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(players.host.getByRole("table", { name: "Chess board" })).toHaveCount(0);
+    const closed = await readGame(players.host);
+    expect(closed.game.visibility).toBe("open");
+    expect(closed.game.closure?.reason).toBe("host-closed");
+    expect(closed.game.outcome).toBeNull();
+    const response = await players.friend.request.get("/api/lobbies");
+    expect(response.status()).toBe(200);
+    expect(openRoomsSchema.parse(await response.json()).rooms.map((room) => room.id)).not.toContain(
+      waiting.game.id,
+    );
+    await players.host.screenshot({
+      path: testInfo.outputPath("closed-open-room.png"),
+      fullPage: true,
+    });
+
+    await joinOpenRoom(players.friend, hostName, "Late visitor");
+    await expect(players.friend.getByRole("alert")).toContainText(
+      "This open room is no longer available. Choose another room.",
+    );
+    await expect(players.friend.getByRole("table", { name: "Chess board" })).toHaveCount(0);
+    expect((await readGame(players.host)).game.players.black).toBeNull();
+    await players.friend.unrouteAll({ behavior: "wait" });
+    await players.friend.getByRole("button", { name: "Refresh open rooms", exact: true }).click();
+    await expect(card).toHaveCount(0);
+    await players.host.getByRole("button", { name: "Create another room", exact: true }).click();
+    await expect(
+      players.host.getByRole("button", { name: "Return to previous room", exact: true }),
+    ).toHaveCount(0);
+    await players.host.getByRole("radio", { name: /Open lobby/ }).check();
+    await players.host.getByRole("button", { name: "Create open room", exact: true }).click();
+    await expect(
+      players.host.getByRole("heading", { name: "Waiting for an opponent", exact: true }),
+    ).toBeVisible();
+    expect((await readGame(players.host)).game.id).not.toBe(waiting.game.id);
+  } finally {
+    try {
+      if (!players.friend.isClosed()) await players.friend.unrouteAll({ behavior: "wait" });
+    } finally {
+      await closePlayers(players);
+    }
+  }
+});
+
+test("a friend joining before a held close command starts a game the host cannot cancel", async ({
+  browser,
+}) => {
+  const players = await createRoom(browser);
+  const gate = await holdNextCommand(players.host);
+  try {
+    const waiting = await readGame(players.host);
+    await players.host.getByRole("button", { name: "Close room", exact: true }).click();
+    const confirmation = players.host.getByRole("dialog", {
+      name: "Close this room?",
+      exact: true,
+    });
+    await confirmation.getByRole("button", { name: "Close room", exact: true }).click();
+    await gate.requested;
+    expect(gate.commands[0]?.action).toEqual({ type: "close-room" });
+    await joinRoom(players);
+    await expect(confirmation).toHaveCount(0);
+    await expect(players.host.getByRole("button", { name: "Close room", exact: true })).toHaveCount(
+      0,
+    );
+    const rejected = players.host.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        /\/api\/games\/[^/]+\/commands$/.test(new URL(response.url()).pathname) &&
+        response.status() === 409,
+    );
+    gate.release();
+    await rejected;
+    await expect(players.host.getByRole("alert")).toBeVisible();
+    const active = await readGame(players.host);
+    expect(active.game.id).toBe(waiting.game.id);
+    expect(active.game.phase).toBe("active");
+    expect(active.game.closure).toBeUndefined();
+    expect(active.game.outcome).toBeNull();
+    expect(active.game.position.moves).toEqual([]);
+    expect(active.game.players.black?.displayName).toBe("Sam");
+    await gate.dispose();
+    await players.host.getByRole("button", { name: "Dismiss error", exact: true }).click();
+    await move(players.host, "e2", "e4");
+    await expect(players.friend.locator('[data-square="e4"]')).toHaveAttribute(
+      "aria-label",
+      /white pawn/,
+    );
+    expect((await readGame(players.friend)).game.position.moves).toHaveLength(1);
+  } finally {
+    await gate.dispose();
+    await closePlayers(players);
+  }
+});

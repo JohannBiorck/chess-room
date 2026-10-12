@@ -108,6 +108,18 @@ describe("guest and room boundaries", () => {
 });
 
 describe("command boundaries", () => {
+  it("accepts an identified close-room command without trusting a chosen host or reason", () => {
+    const closing = { ...command, action: { type: "close-room" } };
+    expect(gameCommandSchema.parse(closing)).toEqual(closing);
+    for (const field of ["hostId", "reason", "closedAt"])
+      expect(
+        gameCommandSchema.safeParse({
+          ...closing,
+          action: { ...closing.action, [field]: "forged" },
+        }).success,
+      ).toBe(false);
+  });
+
   it("accepts only versioned, bounded, identified commands", () => {
     expect(gameCommandSchema.parse(command)).toEqual(command);
     for (const mutation of [
@@ -158,6 +170,81 @@ describe("command boundaries", () => {
     expect(publicClocksSchema.safeParse({ ...clocks, serverNow: "2026-10-05" }).success).toBe(
       false,
     );
+  });
+});
+
+describe("closed room protocol", () => {
+  const closed = {
+    id: "0fe54f10-65af-4c2f-b70d-925d0d1b73ab",
+    revision: 1,
+    phase: "finished",
+    rulesetId: "standard",
+    rulesVersion: 1,
+    timeControl: "untimed",
+    closure: { reason: "host-closed", closedAt: 2000 },
+    players: { white: { displayName: "Ada" }, black: null },
+    position: {
+      fen: "7k/8/8/8/8/8/8/7K w - - 0 1",
+      turn: "white",
+      inCheck: false,
+      board: [{ square: "h1", type: "k", color: "white" }],
+      legalMoves: [],
+      moves: [],
+      checks: { white: 0, black: 0 },
+      claimableDraws: [],
+      outcome: null,
+    },
+    clocks: null,
+    outcome: null,
+    drawOffer: null,
+    rematchRequested: [],
+    rematchGameId: null,
+    createdAt: 1000,
+    updatedAt: 2000,
+  };
+
+  it("distinguishes a cancelled room from a chess result", () => {
+    expect(publicGameSchema.parse(closed)).toEqual(closed);
+    expect(
+      publicGameSchema.safeParse({
+        ...closed,
+        visibility: "open",
+        closure: { reason: "expired", closedAt: 2000 },
+      }).success,
+    ).toBe(true);
+    for (const change of [
+      { phase: "waiting" },
+      { phase: "active" },
+      { outcome: { winner: null, reason: "agreement" } },
+      { drawOffer: "white" },
+      { rematchRequested: ["white"] },
+      { rematchGameId: closed.id },
+      { closure: { reason: "unknown", closedAt: 2000 } },
+      { closure: { reason: "expired", closedAt: 999 } },
+      { closure: { reason: "expired", closedAt: 2001 } },
+      { closure: { ...closed.closure, sessionId: "private" } },
+      { players: { white: { displayName: "Ada" }, black: { displayName: "Ben" } } },
+      { players: { white: null, black: null } },
+      {
+        clocks: {
+          whiteMs: 1000,
+          blackMs: 1000,
+          runningColor: "white",
+          turnStartedAt: 1000,
+          serverNow: 2000,
+        },
+      },
+    ])
+      expect(publicGameSchema.safeParse({ ...closed, ...change }).success).toBe(false);
+  });
+
+  it("rejects a closure projection with played moves or an engine result", () => {
+    const move = { ply: 1, color: "white", from: "e2", to: "e4", san: "e4" };
+    for (const position of [
+      { ...closed.position, moves: [move] },
+      { ...closed.position, outcome: { winner: null, reason: "stalemate" } },
+    ])
+      expect(publicGameSchema.safeParse({ ...closed, position }).success).toBe(false);
   });
 });
 

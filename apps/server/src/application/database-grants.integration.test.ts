@@ -110,6 +110,40 @@ describe("separate migration and runtime database privileges", () => {
     expect(privileges.rows[0]?.allowed).toBe(true);
   });
 
+  it("closes and expires waiting rooms through the restricted runtime role without schema changes", async () => {
+    await grantRuntimeAccess(owner, role, schema);
+    const service = new GameService(runtime);
+    const host = (await service.createSession("Host")).session;
+    const manuallyClosed = await service.create(host, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    const expired = await service.create(host, {
+      rulesetId: "standard",
+      color: "white",
+      timeControl: "untimed",
+      visibility: "open",
+    });
+    const closed = await service.command(host, manuallyClosed.game.id, {
+      protocolVersion: 1,
+      commandId: randomUUID(),
+      expectedRevision: 0,
+      action: { type: "close-room" },
+    });
+    expect(closed.game.closure?.reason).toBe("host-closed");
+    await runtime.pool.query(
+      "UPDATE matches SET created_at=clock_timestamp()-interval '1 hour' WHERE id=$1",
+      [expired.game.id],
+    );
+    await service.expireDue();
+    expect((await service.view(host, expired.game.id)).game.closure?.reason).toBe("expired");
+    expect(await service.openRooms()).toEqual([]);
+    const events = await runtime.transaction((tx) => tx.claimOutbox());
+    expect(events).toHaveLength(4);
+  });
+
   it("denies migration-table access, DDL, truncate and administrative sequence access", async () => {
     await grantRuntimeAccess(owner, role, schema);
     const before = await owner.query<{ count: string }>("SELECT count(*) FROM schema_migrations");
