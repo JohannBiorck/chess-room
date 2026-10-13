@@ -1,0 +1,86 @@
+Classic chess piece artwork by Colin M. L. Burnett (Cburnett)
+Copyright © The author
+Attribution: Colin M. L. Burnett (Cburnett) and Wikimedia Commons contributors
+
+BSD-3-Clause is selected from the author's available licenses.
+Author's licensing statement:
+https://en.wikipedia.org/wiki/User:Cburnett/GFDL_images/Chess
+
+Changes: SVG artwork adapted to JSX; nonfunctional IDs removed; white fills
+changed to ivory. Geometry and proportions are preserved.
+
+Individual source files and downloaded revisions:
+https://commons.wikimedia.org/wiki/File:Chess_bdt45.svg
+Source timestamp: 2021-12-13T19:07:28Z
+SHA-1: da6dd1b5ef629bacebbd2ce26c7d81ba8a205587
+
+https://commons.wikimedia.org/wiki/File:Chess_blt45.svg
+Source timestamp: 2022-07-28T15:24:56Z
+SHA-1: 35dd477dc22636bfcc559a01f75b00369205ffda
+
+https://commons.wikimedia.org/wiki/File:Chess_kdt45.svg
+Source timestamp: 2020-12-10T11:39:11Z
+SHA-1: b1165ef85a3df6f1af2549ab0af78ab21b540e8a
+
+https://commons.wikimedia.org/wiki/File:Chess_klt45.svg
+Source timestamp: 2022-09-11T23:42:28Z
+SHA-1: 2c7569b837971207e40f7148e2b2086aaf8e4bbd
+
+https://commons.wikimedia.org/wiki/File:Chess_ndt45.svg
+Source timestamp: 2021-12-13T19:15:07Z
+SHA-1: 3c79cbbda76bcf1d4e4062cef6dd3b58a250a562
+
+https://commons.wikimedia.org/wiki/File:Chess_nlt45.svg
+Source timestamp: 2021-12-13T19:17:11Z
+SHA-1: 3a2253429c0e39863b3f5ecf447209dccecdc337
+
+https://commons.wikimedia.org/wiki/File:Chess_pdt45.svg
+Source timestamp: 2020-12-11T12:44:02Z
+SHA-1: 0a6d2f3dc6327a02ca591bc489d701fbff228138
+
+https://commons.wikimedia.org/wiki/File:Chess_plt45.svg
+Source timestamp: 2020-12-11T12:45:42Z
+SHA-1: 09d59e2770fcee23722ac53b26e875f76d2c1eb1
+
+https://commons.wikimedia.org/wiki/File:Chess_qdt45.svg
+Source timestamp: 2021-04-26T22:46:36Z
+SHA-1: ed72e75b7bdbf880a3c9bee053c8786cfab8bdb9
+
+https://commons.wikimedia.org/wiki/File:Chess_qlt45.svg
+Source timestamp: 2021-04-26T22:48:20Z
+SHA-1: e638eb28ec25007b9f8fac8476bdf6ae1fc5a0ee
+
+https://commons.wikimedia.org/wiki/File:Chess_rdt45.svg
+Source timestamp: 2021-12-13T19:15:55Z
+SHA-1: bd0e866f1e6da8e3d6f9c0b356b60fc58391aff6
+
+https://commons.wikimedia.org/wiki/File:Chess_rlt45.svg
+Source timestamp: 2021-12-13T19:16:41Z
+SHA-1: 126b7779885b87e87acc713474587732711bc8d3
+
+BSD license terms supplied by the copyright holder:
+
+Copyright © The author
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+3. Neither the name of The author nor the names of its contributors may be
+   used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS "AS IS" AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE AUTHOR AND CONTRIBUTORS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

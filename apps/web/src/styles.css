@@ -1077,28 +1077,9 @@ fieldset legend {
   display: block;
   width: 100%;
   height: 100%;
-  fill: #fdfbee;
-  stroke: #314039;
-  stroke-width: 1.7;
-  stroke-linejoin: round;
-  filter: drop-shadow(0 1px 1px #172c2433);
-}
-.piece--black {
-  fill: #273d34;
-  stroke: #182b22;
-  stroke-width: 1.4;
-}
-.piece-detail {
-  fill: none;
-  stroke-width: 2;
-  stroke-linecap: round;
-}
-.piece--black .piece-detail {
-  stroke: #bbc3ad;
-}
-.piece-eye {
-  fill: #f2edda;
+  fill: #000;
   stroke: none;
+  filter: drop-shadow(0 1px 1px #172c2433);
 }
 .square .piece {
   width: 88%;

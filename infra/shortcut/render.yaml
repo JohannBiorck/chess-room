@@ -1,0 +1,33 @@
+previews:
+  generation: "off"
+
+services:
+  - type: web
+    name: catchess
+    runtime: static
+    branch: main
+    autoDeployTrigger: "off"
+    buildCommand: node --check apps/shortcut/public/redirect.js
+    staticPublishPath: ./apps/shortcut/public
+    envVars:
+      - key: NODE_VERSION
+        value: "24.21.0"
+      - key: SKIP_INSTALL_DEPS
+        value: "true"
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Content-Security-Policy
+        value: "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      - path: /*
+        name: Cache-Control
+        value: no-store

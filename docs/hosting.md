@@ -112,6 +112,30 @@ readiness, worker failures, resource limits and migration
 errors. Keep proxy trust restricted to verified infrastructure rather than
 accepting arbitrary forwarded client addresses.
 
+## Optional shareable address
+
+A `.com` address requires a separately registered domain with renewal fees.
+Connecting a domain to Render does not provide ownership of that domain.
+Keep the supplied address for a deployment with no domain costs.
+[Custom domains](https://render.com/docs/custom-domains).
+
+The optional `infra/shortcut/render.yaml` defines a separate Free static site
+that provides a shorter shareable link, subject to Render hostname availability.
+It publishes only `apps/shortcut/public`, skips dependency installation, has no
+database or credentials, and redirects to the existing game service. It does
+not consume web-service instance hours. Create it separately from the game
+service; the main Blueprint continues to describe only the existing server.
+[Static sites](https://render.com/docs/static-sites),
+[Free static hosting](https://render.com/docs/free#static-sites).
+
+The shortcut preserves invitation paths, queries and fragments. After the
+redirect, the browser displays the game service's original address. Guest
+cookies, saved seats and room recovery stay on that original origin. A direct
+game-hostname migration would create new guest sessions and require a separate
+recovery design; changing a service label does not establish a chosen hostname.
+Keep automatic deploys, previews and notifications off for the shortcut as
+well as the game service.
+
 After deployment, verify HTTPS, two independent guest sessions, invitation
 redemption, legal play over WebSockets, reconnection and refresh. Check database
 replay and role restrictions, then confirm the dashboards still show only Free

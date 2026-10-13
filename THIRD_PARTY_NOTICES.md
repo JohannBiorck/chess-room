@@ -1,5 +1,27 @@
 # Third-party notices
 
+## Classic chess piece artwork
+
+The chess piece illustrations in `apps/web/src/pieces/Classic.tsx` are
+the classic set by Colin M. L. Burnett (Cburnett), with revisions by
+Wikimedia Commons contributors. BSD-3-Clause is selected from the licenses
+offered by the author for all twelve pieces.
+
+Copyright © The author
+
+Source: [Cburnett's chess artwork and licensing statement](https://en.wikipedia.org/wiki/User:Cburnett/GFDL_images/Chess).
+Individual Wikimedia Commons source links, revision timestamps and SHA-1
+checksums are included with the license below.
+
+The original SVG geometry is retained. The artwork is adapted to JSX,
+nonfunctional SVG IDs are removed, and white fills are changed to ivory.
+The complete license and attribution ship with the application at
+[`apps/web/public/licenses/cburnett.txt`](apps/web/public/licenses/cburnett.txt),
+served publicly as `/licenses/cburnett.txt`. No external artwork requests are
+made while playing.
+
+## chess.js
+
 Chess rules use chess.js 1.4.0, licensed under BSD-2-Clause.
 
 Copyright (c) 2025, Jeff Hlywa (jhlywa@gmail.com)
