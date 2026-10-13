@@ -7,6 +7,11 @@ API and WebSocket transport from one HTTPS origin. `render.yaml` declares the
 service; it contains no database credentials or database resource that expires
 after a trial period.
 
+The [shareable address](https://catchess.onrender.com) uses a separate Free
+static site that redirects to this existing game origin. It preserves
+invitation links and guest recovery; the browser shows the game host's address
+after redirecting. The static site has no database connections or credentials.
+
 The deployed database uses PostgreSQL 18, fixed 0.25 CU compute and five-minute
 idle suspension. Runtime access uses a separate restricted SQL-created role;
 startup migrations use the owner connection. Both connections verify TLS

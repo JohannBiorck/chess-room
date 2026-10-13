@@ -38,7 +38,8 @@ Legal moves appear immediately on your board while the server confirms them.
 Confirmed moves and cat visits are shared with both players; a rejected move
 restores the saved position.
 
-[Play Cat Chess online](https://chess-room-c09w.onrender.com). The free service
+[Play Cat Chess online](https://catchess.onrender.com). This free shortcut
+opens the existing game host, so saved seats and rooms keep working. The free service
 can take approximately a minute to wake after inactivity. Read
 [hosting limits](docs/hosting.md) before starting a timed game.
 
