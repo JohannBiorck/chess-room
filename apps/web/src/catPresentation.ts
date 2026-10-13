@@ -1,4 +1,5 @@
 import type { CatEffect, Color } from "@chess-room/contracts";
+import { pieceNames } from "./Piece";
 
 export function catChanceLabel(chance: number): string {
   return chance === 0 ? "Off" : `${Math.abs(chance)}% ${chance > 0 ? "helpful" : "evil"}`;
@@ -12,8 +13,12 @@ export function catChanceDescription(chance: number): string {
 
 export function catEffectDescription(effect: CatEffect): string {
   const owner = effect.color === "white" ? "White" : "Black";
-  if (effect.action === "none") return `${owner}’s cat made no change.`;
-  return `${owner}’s cat ${effect.action === "add" ? "added a pawn on" : "removed a pawn from"} ${effect.square}.`;
+  const piece = pieceNames[effect.piece ?? "p"];
+  if (effect.action === "none")
+    return effect.piece
+      ? `${owner}’s cat picked a ${piece} and made no change.`
+      : `${owner}’s cat made no change.`;
+  return `${owner}’s cat ${effect.action === "add" ? `added a ${piece} on` : `removed a ${piece} from`} ${effect.square}.`;
 }
 
 export function catEffectAnnouncement(effect: CatEffect): string {

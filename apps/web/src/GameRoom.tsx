@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from "react";
 import { invitationUrl } from "./api";
 import { Board } from "./Board";
 import { Cat } from "./Cat";
+import { ChaosCatRules } from "./ChaosCatRules";
 import { Clock } from "./Clock";
 import { catChanceLabel, catEffectDescription } from "./catPresentation";
 import { CopyIcon, FlipIcon, LinkIcon } from "./Icons";
@@ -36,6 +37,7 @@ const reasonLabels: Record<GameOutcome["reason"], string> = {
   "timeout-insufficient-material": "Time ran out with insufficient mating material",
   "move-limit": "Game move limit reached",
   "session-expired": "Guest sessions expired",
+  "king-captured": "King captured",
 };
 
 type GameRoomProps = {
@@ -115,6 +117,8 @@ export function GameRoom({
   const rule = RULESETS.find((entry) => entry.id === game.rulesetId);
   const active = game.phase === "active";
   const openRoom = game.visibility === "open";
+  const chaos = game.rulesetId === "chaos-cat";
+  const threatenedKings = game.position.threatenedKings ?? [];
   const finished = game.phase === "finished";
   const yourTurn = active && seat === game.position.turn;
   const canMove = yourTurn && !busy && connection === "connected";
@@ -206,7 +210,7 @@ export function GameRoom({
       <main id="main" tabIndex={-1} className="game-room">
         <section className="closed-room" aria-labelledby="closed-room-heading">
           <span className="closed-room-piece" aria-hidden="true">
-            <Piece type="n" color="black" />
+            <Cat />
           </span>
           <p className="eyebrow">THIS TABLE IS CLOSED</p>
           <h1 id="closed-room-heading" aria-live="polite">
@@ -285,6 +289,8 @@ export function GameRoom({
             seat={seat}
             turn={game.position.turn}
             inCheck={!preview && game.position.inCheck}
+            kingCapture={chaos}
+            threatenedKings={preview ? [] : threatenedKings}
             canMove={canMove}
             busy={busy}
             revision={game.revision}
@@ -332,13 +338,17 @@ export function GameRoom({
               <p>
                 {preview
                   ? "Your piece has moved. Waiting for confirmation."
-                  : game.position.inCheck
-                    ? `${game.position.turn === "white" ? "White" : "Black"} is in check. Protect the king.`
-                    : yourTurn
-                      ? "Select one of your pieces to see its legal moves."
-                      : openRoom
-                        ? "Take a moment. Your opponent is thinking."
-                        : "Take a moment. Your friend is thinking."}
+                  : chaos && threatenedKings.length > 0
+                    ? threatenedKings.length === 2
+                      ? "Both kings are exposed. Protect your own, or capture your opponent’s king to win."
+                      : `${threatenedKings[0] === "white" ? "White" : "Black"}’s king is exposed and can be captured. Watch the board carefully.`
+                    : game.position.inCheck
+                      ? `${game.position.turn === "white" ? "White" : "Black"} is in check. Protect the king.`
+                      : yourTurn
+                        ? "Select one of your pieces to see its legal moves."
+                        : openRoom
+                          ? "Take a moment. Your opponent is thinking."
+                          : "Take a moment. Your friend is thinking."}
               </p>
             )}
             {game.phase === "waiting" && openRoom && (
@@ -384,6 +394,7 @@ export function GameRoom({
               </p>
             </fieldset>
           )}
+          {chaos && <ChaosCatRules />}
           {game.phase === "waiting" && !openRoom && (
             <section className="invite-panel" aria-labelledby="invite-heading">
               <h3 id="invite-heading">
@@ -606,6 +617,16 @@ export function GameRoom({
                 ranks 1–4 for White and 5–8 for Black. Evil cats remove one of their owner’s pawns.
                 The signed chances are fixed for this game; each committed action is recorded in
                 history and never rerolled by reconnecting.
+              </p>
+            )}
+            {chaos && (
+              <p>
+                After each move, your cat has a 50% chance to give a piece and a 50% chance to steal
+                one. A pawn is chosen 50% of the time; a rook, bishop, knight or queen 12.5% each.
+                Gifts use ranks 1–4 for White or 5–8 for Black. The cat never touches a king, but it
+                can remove a defender and expose your king to capture. Capture the opposing king to
+                win. Checkmate also ends the game. Every cat action is saved in history and stays
+                the same when you reconnect.
               </p>
             )}
             <p>

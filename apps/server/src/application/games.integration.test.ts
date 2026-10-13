@@ -842,6 +842,137 @@ describe("durable game application", () => {
     expect((await service.view(white, successor.game.id)).seat).toBe("black");
   });
 
+  it("discovers a Chaos Cat lobby without adjustable settings and preserves its mode through a rematch", async () => {
+    const created = await service.create(black, {
+      rulesetId: "chaos-cat",
+      color: "black",
+      timeControl: "10+5",
+      visibility: "open",
+    });
+    const rooms = openRoomsSchema.parse({ rooms: await service.openRooms() }).rooms;
+    expect(rooms).toHaveLength(1);
+    expect(rooms[0]).toMatchObject({
+      id: created.game.id,
+      rulesetId: "chaos-cat",
+      host: { color: "black", displayName: "Black player" },
+      timeControl: "10+5",
+    });
+    expect(rooms[0]).not.toHaveProperty("catchess");
+    let view = await service.joinOpen(white, created.game.id);
+    view = await act(view, black, { type: "resign" });
+    view = await act(view, black, { type: "request-rematch" });
+    view = await act(view, white, { type: "accept-rematch" });
+    if (!view.game.rematchGameId) throw new Error("A Chaos Cat rematch was not created.");
+    const successor = gameViewSchema.parse(await service.view(black, view.game.rematchGameId));
+    expect(successor.seat).toBe("white");
+    expect(successor.game).toMatchObject({
+      rulesetId: "chaos-cat",
+      timeControl: "10+5",
+      phase: "active",
+    });
+    expect(successor.game).not.toHaveProperty("catchess");
+    expect(successor.game.position.catEffects).toEqual([]);
+    expect(successor.game.position.threatenedKings).toEqual([]);
+    expect(successor.game.position.board).toHaveLength(32);
+    expect((await service.view(white, successor.game.id)).seat).toBe("black");
+  });
+
+  it("persists a missing Chaos Cat target as a no-op without stealing a different piece", async () => {
+    const draw = "17".padStart(64, "0");
+    service = new GameService(
+      database,
+      () => now,
+      () => draw,
+    );
+    const view = await start({ rulesetId: "chaos-cat" });
+    await database.pool.query("UPDATE matches SET engine_state=$2 WHERE id=$1", [
+      view.game.id,
+      createEngineState("chaos-cat", "4k3/8/8/8/8/8/P7/4K3 w - - 0 1"),
+    ]);
+    const accepted = await act(view, white, { type: "move", from: "a2", to: "a3" });
+    expect(gameViewSchema.parse(accepted)).toEqual(accepted);
+    expect(accepted.game.phase).toBe("active");
+    expect(accepted.game.position.board).toHaveLength(3);
+    expect(accepted.game.position.catEffects).toEqual([
+      { ply: 1, color: "white", action: "none", piece: "r" },
+    ]);
+    expect(accepted.game.position.board).toContainEqual({
+      square: "a3",
+      type: "p",
+      color: "white",
+    });
+    const stored = await database.transaction((tx) => tx.getGame(view.game.id));
+    expect(engineStateSchema.parse(stored?.engineState).catTurns).toEqual([
+      { draw, effect: accepted.game.position.catEffects?.[0] },
+    ]);
+    const events = await database.transaction((tx) => tx.listEvents(view.game.id, 1));
+    expect(events[0]?.payload.catEffect).toEqual(accepted.game.position.catEffects?.[0]);
+    expect(await service.pgn(white, view.game.id)).toContain('[Variant "Chaos Cat"]');
+  });
+
+  it("recovers a cat-exposed king and finishes a captured king with one durable acknowledgement", async () => {
+    const draw = vi.fn(() => "17".padStart(64, "0"));
+    service = new GameService(database, () => now, draw);
+    let view = await start({ rulesetId: "chaos-cat", timeControl: "10+5" });
+    await database.pool.query("UPDATE matches SET engine_state=$2 WHERE id=$1", [
+      view.game.id,
+      createEngineState("chaos-cat", "k3r3/8/8/8/8/8/P3R3/4K3 w - - 0 1"),
+    ]);
+    view = await act(view, white, { type: "move", from: "a2", to: "a3" });
+    expect(gameViewSchema.parse(view)).toEqual(view);
+    expect(view.game.phase).toBe("active");
+    expect(view.game.position.catEffects?.[0]).toEqual({
+      ply: 1,
+      color: "white",
+      action: "remove",
+      piece: "r",
+      square: "e2",
+    });
+    expect(view.game.position.threatenedKings).toEqual(["white"]);
+    expect(view.game.position.legalMoves).toContainEqual({ from: "e8", to: "e1" });
+    await database.close();
+    database = new Database(connectionString, { options: `-c search_path=${schema}` });
+    service = new GameService(database, () => now, draw);
+    const restored = await service.view(black, view.game.id);
+    expect(restored.game.position).toEqual(view.game.position);
+    const capture = command(restored.game.revision, { type: "move", from: "e8", to: "e1" });
+    const accepted = await service.command(black, view.game.id, capture);
+    expect(gameViewSchema.parse(accepted)).toEqual(accepted);
+    expect(accepted.game).toMatchObject({
+      phase: "finished",
+      outcome: { winner: "black", reason: "king-captured" },
+      clocks: { runningColor: null, turnStartedAt: null },
+    });
+    expect(accepted.game.position.outcome).toEqual(accepted.game.outcome);
+    expect(
+      accepted.game.position.board.some((piece) => piece.color === "white" && piece.type === "k"),
+    ).toBe(false);
+    expect(accepted.game.position.legalMoves).toEqual([]);
+    expect(accepted.game.position.catEffects).toHaveLength(2);
+    expect(accepted.game.position.catEffects?.[1]?.action).toBe("none");
+    expect(await service.command(black, view.game.id, capture)).toEqual(accepted);
+    const events = await database.transaction((tx) => tx.listEvents(view.game.id, 1));
+    expect(events).toHaveLength(2);
+    expect(events[1]?.payload.outcome).toEqual(accepted.game.outcome);
+    expect(events[1]?.payload.catEffect).toEqual(accepted.game.position.catEffects?.[1]);
+    await expect(
+      act(accepted, white, { type: "move", from: "a3", to: "a4" }),
+    ).rejects.toMatchObject({
+      code: "GAME_NOT_ACTIVE",
+    });
+    const pgn = await service.pgn(white, view.game.id);
+    expect(pgn).toContain('[Variant "Chaos Cat"]');
+    expect(pgn).toContain('[Result "0-1"]');
+    expect(pgn).toContain("remove");
+    expect(pgn).toContain("r e2");
+    expect(pgn).not.toContain("17".padStart(64, "0"));
+    await database.close();
+    database = new Database(connectionString, { options: `-c search_path=${schema}` });
+    service = new GameService(database, () => now, draw);
+    expect((await service.view(white, view.game.id)).game.position).toEqual(accepted.game.position);
+    expect(await service.command(black, view.game.id, capture)).toEqual(accepted);
+  });
+
   it.each([
     { chance: 100, action: "add", pawns: 9, pieces: 33 },
     { chance: -100, action: "remove", pawns: 7, pieces: 31 },
@@ -878,64 +1009,78 @@ describe("durable game application", () => {
     },
   );
 
-  it("draws server entropy only after authorization, revision and turn guards and never rerolls accepted retries", async () => {
-    const draw = vi.fn(() => "a".repeat(64));
-    service = new GameService(database, () => now, draw);
-    const view = await start({ rulesetId: "catchess", catchess: { host: 100, guest: -100 } });
-    const stranger = (await service.createSession("Stranger")).session;
-    const first = command(1, { type: "move", from: "e2", to: "e4" });
-    await expect(service.command(stranger, view.game.id, first)).rejects.toMatchObject({
-      code: "FORBIDDEN",
-    });
-    await expect(
-      service.command(white, view.game.id, { ...first, expectedRevision: 0 }),
-    ).rejects.toMatchObject({ code: "STALE_REVISION" });
-    await expect(
-      service.command(black, view.game.id, command(1, { type: "move", from: "e7", to: "e5" })),
-    ).rejects.toMatchObject({ code: "NOT_YOUR_TURN" });
-    expect(draw).not.toHaveBeenCalled();
-    const acknowledgements = await Promise.all([
-      service.command(white, view.game.id, first),
-      service.command(white, view.game.id, first),
-    ]);
-    expect(acknowledgements[0]).toEqual(acknowledgements[1]);
-    expect(draw).toHaveBeenCalledTimes(1);
-    const accepted = acknowledgements[0];
-    if (!accepted) throw new Error("Catchess move was not acknowledged.");
-    const later = await act(accepted, black, { type: "move", from: "e7", to: "e5" });
-    expect(draw).toHaveBeenCalledTimes(2);
-    expect(await service.command(white, view.game.id, first)).toEqual(accepted);
-    expect(draw).toHaveBeenCalledTimes(2);
-    await database.close();
-    database = new Database(connectionString, { options: `-c search_path=${schema}` });
-    service = new GameService(database, () => now, draw);
-    expect((await service.view(white, view.game.id)).game).toEqual(later.game);
-    expect(await service.command(white, view.game.id, first)).toEqual(accepted);
-    expect(draw).toHaveBeenCalledTimes(2);
-    const events = await database.transaction((tx) => tx.listEvents(view.game.id, 1));
-    expect(events).toHaveLength(2);
-  });
+  it.each(["catchess", "chaos-cat"] as const)(
+    "draws $0 entropy only after authorization, revision and turn guards and never rerolls accepted retries",
+    async (rulesetId) => {
+      const draw = vi.fn(() => "a".repeat(64));
+      service = new GameService(database, () => now, draw);
+      const view = await start({
+        rulesetId,
+        ...(rulesetId === "catchess" ? { catchess: { host: 100, guest: -100 } } : {}),
+      });
+      const stranger = (await service.createSession("Stranger")).session;
+      const first = command(1, { type: "move", from: "e2", to: "e4" });
+      await expect(service.command(stranger, view.game.id, first)).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
+      await expect(
+        service.command(white, view.game.id, { ...first, expectedRevision: 0 }),
+      ).rejects.toMatchObject({ code: "STALE_REVISION" });
+      await expect(
+        service.command(black, view.game.id, command(1, { type: "move", from: "e7", to: "e5" })),
+      ).rejects.toMatchObject({ code: "NOT_YOUR_TURN" });
+      expect(draw).not.toHaveBeenCalled();
+      const acknowledgements = await Promise.all([
+        service.command(white, view.game.id, first),
+        service.command(white, view.game.id, first),
+      ]);
+      expect(acknowledgements[0]).toEqual(acknowledgements[1]);
+      expect(draw).toHaveBeenCalledTimes(1);
+      const accepted = acknowledgements[0];
+      if (!accepted) throw new Error("Cat move was not acknowledged.");
+      const later = await act(accepted, black, { type: "move", from: "e7", to: "e5" });
+      expect(draw).toHaveBeenCalledTimes(2);
+      expect(await service.command(white, view.game.id, first)).toEqual(accepted);
+      expect(draw).toHaveBeenCalledTimes(2);
+      await database.close();
+      database = new Database(connectionString, { options: `-c search_path=${schema}` });
+      service = new GameService(database, () => now, draw);
+      expect((await service.view(white, view.game.id)).game).toEqual(later.game);
+      expect(await service.command(white, view.game.id, first)).toEqual(accepted);
+      expect(draw).toHaveBeenCalledTimes(2);
+      const events = await database.transaction((tx) => tx.listEvents(view.game.id, 1));
+      expect(events).toHaveLength(2);
+    },
+  );
 
-  it("serializes competing Catchess commands without applying a second cat effect", async () => {
-    const draw = vi.fn(() => "b".repeat(64));
-    service = new GameService(database, () => now, draw);
-    const view = await start({ rulesetId: "catchess", catchess: { host: 100, guest: 0 } });
-    const results = await Promise.allSettled([
-      service.command(white, view.game.id, command(1, { type: "move", from: "e2", to: "e4" })),
-      service.command(white, view.game.id, command(1, { type: "move", from: "d2", to: "d4" })),
-    ]);
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-    const rejected = results.find((result) => result.status === "rejected");
-    expect(rejected?.status === "rejected" ? rejected.reason : null).toMatchObject({
-      code: "STALE_REVISION",
-    });
-    expect(draw).toHaveBeenCalledTimes(1);
-    const current = await service.view(white, view.game.id);
-    expect(current.game.revision).toBe(2);
-    expect(current.game.position.moves).toHaveLength(1);
-    expect(current.game.position.catEffects).toHaveLength(1);
-    expect(current.game.position.board).toHaveLength(33);
-  });
+  it.each(["catchess", "chaos-cat"] as const)(
+    "serializes competing $0 commands without applying a second cat effect",
+    async (rulesetId) => {
+      const draw = vi.fn(() => "b".repeat(64));
+      service = new GameService(database, () => now, draw);
+      const view = await start({
+        rulesetId,
+        ...(rulesetId === "catchess" ? { catchess: { host: 100, guest: 0 } } : {}),
+      });
+      const results = await Promise.allSettled([
+        service.command(white, view.game.id, command(1, { type: "move", from: "e2", to: "e4" })),
+        service.command(white, view.game.id, command(1, { type: "move", from: "d2", to: "d4" })),
+      ]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      const rejected = results.find((result) => result.status === "rejected");
+      expect(rejected?.status === "rejected" ? rejected.reason : null).toMatchObject({
+        code: "STALE_REVISION",
+      });
+      expect(draw).toHaveBeenCalledTimes(1);
+      const current = await service.view(white, view.game.id);
+      expect(current.game.revision).toBe(2);
+      expect(current.game.position.moves).toHaveLength(1);
+      expect(current.game.position.catEffects).toHaveLength(1);
+      expect(current.game.position.board).toHaveLength(
+        current.game.position.catEffects?.[0]?.action === "add" ? 33 : 31,
+      );
+    },
+  );
 
   it.each(["standard", "three-check"] as const)(
     "reads old $0 records and acknowledgements without changing their wire shape",
@@ -1208,6 +1353,20 @@ describe("durable game application", () => {
       winner: null,
       reason: "timeout-insufficient-material",
     });
+  });
+
+  it("awards a Chaos Cat timeout to a bare king because the cat can grant winning material", async () => {
+    const view = await start({ rulesetId: "chaos-cat", timeControl: "5+0" });
+    await database.pool.query("UPDATE matches SET engine_state=$2 WHERE id=$1", [
+      view.game.id,
+      createEngineState("chaos-cat", "4k3/8/8/8/8/8/R7/K7 w - - 0 1"),
+    ]);
+    now += 300_000;
+    await service.expireDue();
+    const expired = gameViewSchema.parse(await service.view(white, view.game.id));
+    expect(expired.game.outcome).toEqual({ winner: "black", reason: "timeout" });
+    expect(expired.game.position.catEffects).toEqual([]);
+    expect(expired.game.clocks?.runningColor).toBeNull();
   });
 
   it("bounds rooms and retains expired waiting closures while retaining an active game", async () => {

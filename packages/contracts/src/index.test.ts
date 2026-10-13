@@ -75,9 +75,10 @@ describe("guest and room boundaries", () => {
   it("normalizes a display name and applies the smallest match defaults", () => {
     expect(guestSessionSchema.parse({ displayName: "  Ada  " })).toEqual({ displayName: "Ada" });
     expect(createGameSchema.parse({})).toEqual({
-      rulesetId: "standard",
+      rulesetId: "catchess",
       color: "random",
       timeControl: "untimed",
+      catchess: { host: 25, guest: 25 },
     });
   });
 
@@ -274,7 +275,7 @@ describe("Catchess protocol boundaries", () => {
   });
 
   it("rejects cat settings in other modes and client-supplied draws/effects", () => {
-    for (const rulesetId of ["standard", "three-check"]) {
+    for (const rulesetId of ["standard", "three-check", "chaos-cat"]) {
       expect(
         createGameSchema.safeParse({ rulesetId, catchess: { host: 0, guest: 0 } }).success,
       ).toBe(false);
@@ -353,5 +354,137 @@ describe("Catchess protocol boundaries", () => {
         position: { ...legacy.position, catEffects: [] },
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("Chaos Cat protocol boundaries", () => {
+  const game = {
+    id: "0fe54f10-65af-4c2f-b70d-925d0d1b73ab",
+    revision: 2,
+    phase: "active",
+    rulesetId: "chaos-cat",
+    rulesVersion: 1,
+    timeControl: "untimed",
+    players: { white: { displayName: "Ada" }, black: { displayName: "Ben" } },
+    position: {
+      fen: "7k/8/8/8/4P3/P7/8/7K b - - 0 1",
+      turn: "black",
+      inCheck: false,
+      threatenedKings: [],
+      board: [{ square: "h1", type: "k", color: "white" }],
+      legalMoves: [],
+      moves: [{ ply: 1, color: "white", from: "e2", to: "e4", san: "e4" }],
+      checks: { white: 0, black: 0 },
+      claimableDraws: [],
+      outcome: null,
+      catEffects: [{ ply: 1, color: "white", action: "add", piece: "p", square: "a3" }],
+    },
+    clocks: null,
+    outcome: null,
+    drawOffer: null,
+    rematchRequested: [],
+    rematchGameId: null,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+
+  it("uses fixed Chaos rules without allowing player probability settings", () => {
+    expect(createGameSchema.parse({ rulesetId: "chaos-cat" })).toEqual({
+      rulesetId: "chaos-cat",
+      color: "random",
+      timeControl: "untimed",
+    });
+    expect(publicGameSchema.parse(game)).toEqual(game);
+    expect(
+      publicGameSchema.safeParse({ ...game, catchess: { white: 100, black: 100 } }).success,
+    ).toBe(false);
+    expect(publicGameSchema.safeParse({ ...game, catchess: null }).success).toBe(false);
+    for (const change of [
+      { piece: undefined },
+      { piece: "k" },
+      { piece: "queen" },
+      { color: "black" },
+      { ply: 2 },
+      { draw: "private entropy" },
+    ])
+      expect(
+        publicGameSchema.safeParse({
+          ...game,
+          position: {
+            ...game.position,
+            catEffects: [{ ...game.position.catEffects[0], ...change }],
+          },
+        }).success,
+      ).toBe(false);
+    expect(
+      openRoomsSchema.safeParse({
+        rooms: [
+          {
+            id: game.id,
+            host: { displayName: "Ada", color: "white" },
+            rulesetId: "chaos-cat",
+            timeControl: "untimed",
+            createdAt: 1,
+            expiresAt: 2,
+          },
+        ],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("keeps piece metadata and exposed-king fields exclusive to Chaos", () => {
+    const catchess = { ...game, rulesetId: "catchess", catchess: { white: 25, black: 25 } };
+    expect(publicGameSchema.safeParse(catchess).success).toBe(false);
+    expect(
+      publicGameSchema.safeParse({
+        ...catchess,
+        position: {
+          ...game.position,
+          threatenedKings: undefined,
+          catEffects: [
+            {
+              ply: 1,
+              color: "white",
+              action: "add",
+              square: "a3",
+            },
+          ],
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      publicGameSchema.safeParse({
+        ...game,
+        position: { ...game.position, threatenedKings: ["white", "white"] },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("permits a terminal no-effect king capture only in Chaos with an actual winner", () => {
+    const terminal = {
+      ...game,
+      phase: "finished",
+      outcome: { winner: "black", reason: "king-captured" },
+      position: {
+        ...game.position,
+        outcome: { winner: "black", reason: "king-captured" },
+        catEffects: [{ ply: 1, color: "white", action: "none" }],
+      },
+    };
+    expect(publicGameSchema.safeParse(terminal).success).toBe(true);
+    expect(
+      publicGameSchema.safeParse({
+        ...terminal,
+        outcome: { winner: null, reason: "king-captured" },
+      }).success,
+    ).toBe(false);
+    for (const rulesetId of ["standard", "three-check", "catchess"])
+      expect(publicGameSchema.safeParse({ ...terminal, rulesetId }).success).toBe(false);
+    expect(
+      publicGameSchema.safeParse({
+        ...game,
+        position: { ...game.position, catEffects: [{ ply: 1, color: "white", action: "none" }] },
+      }).success,
+    ).toBe(false);
   });
 });

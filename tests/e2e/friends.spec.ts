@@ -4,7 +4,9 @@ import {
   gameCommandSchema,
   gameViewSchema,
   openRoomsSchema,
+  type RulesetId,
 } from "@chess-room/contracts";
+import { applyEngineMove, createEngineState } from "@chess-room/game-core";
 import {
   type Browser,
   type BrowserContext,
@@ -14,6 +16,7 @@ import {
   test,
   type WebSocketRoute,
 } from "@playwright/test";
+import { Pool } from "pg";
 
 type Players = {
   host: Page;
@@ -71,7 +74,7 @@ test.afterEach(() => {
 async function createRoom(
   browser: Browser,
   options: {
-    mode?: "standard" | "three-check" | "catchess";
+    mode?: RulesetId;
     time?: string;
     mobile?: boolean;
     cats?: { host: number; guest: number };
@@ -99,17 +102,19 @@ async function createRoom(
   await host.goto("/");
   await host.getByLabel("Your display name").fill(options.hostName ?? "Alex");
   await host.getByLabel("Your pieces").selectOption("white");
-  if (options.mode)
-    await host
-      .getByRole("radio", {
-        name:
-          options.mode === "standard"
-            ? /Standard chess/
-            : options.mode === "three-check"
-              ? /Three-check/
-              : /Catchess/,
-      })
-      .check();
+  const mode = options.mode ?? "standard";
+  await host
+    .getByRole("radio", {
+      name:
+        mode === "standard"
+          ? /Standard chess/
+          : mode === "three-check"
+            ? /Three-check/
+            : mode === "chaos-cat"
+              ? /Chaos Cat/
+              : /Cat Chess/,
+    })
+    .check();
   if (options.cats) {
     await setCatChance(host, "Your cat", options.cats.host);
     await setCatChance(host, "Friend’s cat", options.cats.guest);
@@ -727,7 +732,7 @@ test("Catchess sliders keep independent signed chances and omit cat settings in 
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("radio", { name: /Catchess/ }).check();
+  await page.getByRole("radio", { name: /Cat Chess/ }).check();
   const host = page.getByRole("slider", { name: "Your cat", exact: true });
   const guest = page.getByRole("slider", { name: "Friend’s cat", exact: true });
   await expect(host).toHaveValue("25");
@@ -1307,7 +1312,7 @@ test("a fresh mobile visitor discovers an open room, joins from the keyboard and
     const rooms = players.friend.getByRole("region", { name: "Open rooms", exact: true });
     const card = rooms.getByRole("listitem").filter({ hasText: hostName });
     await expect(rooms.getByRole("listitem").filter({ hasText: originalName })).toHaveCount(0);
-    await expect(card).toContainText("Catchess");
+    await expect(card).toContainText("Cat Chess");
     await expect(card).toContainText("10 minutes + 5 seconds");
     await expect(
       observer
@@ -1673,6 +1678,192 @@ test("a friend joining before a held close command starts a game the host cannot
     expect((await readGame(players.friend)).game.position.moves).toHaveLength(1);
   } finally {
     await gate.dispose();
+    await closePlayers(players);
+  }
+});
+
+test("Cat Chess is the default mode and its refreshed lobby works on desktop and mobile", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/");
+  await expect(page).toHaveTitle(/Cat Chess/);
+  await expect(page.locator("header").getByRole("link", { name: /Cat Chess/ })).toBeVisible();
+  const catMode = page.getByRole("radio", { name: /Cat Chess/ });
+  await expect(catMode).toBeChecked();
+  await expect(page.getByRole("slider", { name: "Your cat", exact: true })).toHaveValue("25");
+  await expect(page.getByRole("slider", { name: "Friend’s cat", exact: true })).toHaveValue("25");
+  await page.screenshot({
+    path: testInfo.outputPath("cat-chess-lobby-desktop.png"),
+    fullPage: true,
+  });
+  await page.getByRole("radio", { name: /Chaos Cat/ }).check();
+  await expect(page.getByRole("slider")).toHaveCount(0);
+  const chaosRules = page.getByRole("region", { name: "Chaos Cat rules", exact: true });
+  await expect(chaosRules).toBeVisible();
+  await expect(chaosRules).toContainText("50%");
+  await expect(chaosRules).toContainText("12.5%");
+  await expect(chaosRules).toContainText(/king/i);
+  await catMode.check();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(
+    page.getByRole("button", { name: "Create private room", exact: true }),
+  ).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({
+    path: testInfo.outputPath("cat-chess-lobby-mobile.png"),
+    fullPage: true,
+  });
+  await page.getByLabel("Your display name").fill("Default cat host");
+  await page.getByRole("button", { name: "Create private room", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Waiting for your friend", exact: true }),
+  ).toBeVisible();
+  const room = await readGame(page);
+  expect(room.game.rulesetId).toBe("catchess");
+  expect(room.game.catchess).toEqual({ white: 25, black: 25 });
+  await page.getByRole("button", { name: "Close room", exact: true }).click();
+  await page
+    .getByRole("dialog", { name: "Close this room?", exact: true })
+    .getByRole("button", { name: "Close room", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "Room closed", exact: true })).toBeVisible();
+});
+
+test("Chaos Cat changes real pieces and both friends see each visit once across reload and rematch", async ({
+  browser,
+}, testInfo) => {
+  const players = await createRoom(browser, { mode: "chaos-cat", mobile: true });
+  try {
+    await joinRoom(players);
+    await expect(
+      players.host.getByRole("heading", { name: "Chaos Cat", exact: true }),
+    ).toBeVisible();
+    await auditCatVisits(players.host);
+    await auditCatVisits(players.friend);
+    const starting = (await readGame(players.host)).game;
+    expect(starting.catchess).toBeUndefined();
+    const names = { p: "pawn", n: "knight", b: "bishop", r: "rook", q: "queen" } as const;
+    for (const [actor, from, to, ply] of [
+      ["host", "e2", "e4", 1],
+      ["friend", "e7", "e5", 2],
+    ] as const) {
+      await players[actor].bringToFront();
+      await move(players[actor], from, to);
+      const next = (await readGame(players[actor])).game;
+      const effect = next.position.catEffects?.[ply - 1];
+      expect(next.rulesetId).toBe("chaos-cat");
+      expect(effect?.piece).toBeTruthy();
+      expect(effect?.action).not.toBe("none");
+      if (!effect?.piece || !effect.square || effect.action === "none")
+        throw new Error("The opening cat effect did not apply.");
+      expect(next.position.board.filter((piece) => piece.type === "k")).toHaveLength(2);
+      const changedPiece = { square: effect.square, type: effect.piece, color: effect.color };
+      if (effect.action === "add") expect(next.position.board).toContainEqual(changedPiece);
+      else expect(next.position.board).not.toContainEqual(changedPiece);
+      for (const page of [players.host, players.friend]) {
+        const visit = page.locator(`[data-cat-ply="${ply}"]`);
+        await expect(visit).toHaveAttribute("data-cat-piece", effect.piece);
+        await expect(visit).toHaveAttribute("data-cat-action", effect.action);
+        await expect(page.locator(".cat-history-effect").nth(ply - 1)).toContainText(
+          names[effect.piece],
+        );
+      }
+      await players.host.screenshot({
+        path: testInfo.outputPath(`chaos-cat-move-${ply}.png`),
+        fullPage: true,
+      });
+      await expect(players.host.locator(".cat-layer")).toHaveCount(0);
+      await expect(players.friend.locator(".cat-layer")).toHaveCount(0);
+    }
+    for (const page of [players.host, players.friend])
+      expect(await page.evaluate(() => Reflect.get(window, "catVisitAudit"))).toEqual(["1", "2"]);
+    const committed = (await readGame(players.host)).game;
+    await players.host.reload();
+    await expect(players.host.locator(".cat-history-effect")).toHaveCount(2);
+    await expect(players.host.locator(".cat-layer")).toHaveCount(0);
+    expect((await readGame(players.host)).game.position).toEqual(committed.position);
+    expect(
+      await players.host.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    ).toBe(true);
+    await players.host.getByRole("button", { name: "Resign", exact: true }).click();
+    await players.host.getByRole("button", { name: "Resign game", exact: true }).click();
+    await players.host.getByRole("button", { name: "Request rematch", exact: true }).click();
+    await players.friend.getByRole("button", { name: "Accept rematch", exact: true }).click();
+    await players.host.getByRole("button", { name: "Go to rematch", exact: true }).click();
+    await expect(
+      players.host.getByRole("heading", { name: "Sam’s move", exact: true }),
+    ).toBeVisible();
+    const rematch = (await readGame(players.host)).game;
+    expect(rematch.id).not.toBe(starting.id);
+    expect(rematch.rulesetId).toBe("chaos-cat");
+    expect(rematch.catchess).toBeUndefined();
+    expect(rematch.position.catEffects).toEqual([]);
+    expect((await readGame(players.host)).seat).toBe("black");
+  } finally {
+    await closePlayers(players);
+  }
+});
+
+test("a Chaos Cat rook theft exposes the king and a real opponent capture wins", async ({
+  browser,
+}) => {
+  const players = await createRoom(browser, { mode: "chaos-cat" });
+  try {
+    await joinRoom(players);
+    const original = await readGame(players.host);
+    // This deterministic setup is confined to the local browser-test database.
+    // It avoids adding a production endpoint or depending on a rare random theft.
+    if (!process.env.TEST_DATABASE_URL && !process.env.DATABASE_URL) process.loadEnvFile(".env");
+    const databaseUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
+    if (
+      !databaseUrl ||
+      !["localhost", "127.0.0.1", "[::1]"].includes(new URL(databaseUrl).hostname)
+    )
+      throw new Error("The browser fixture requires a loopback-only test database.");
+    const initial = createEngineState("chaos-cat", "k3r3/8/8/8/8/8/P3R3/4K3 w - - 0 1");
+    const state = applyEngineMove(initial, { from: "a2", to: "a3" }, "17".padStart(64, "0"));
+    const pool = new Pool({
+      connectionString: databaseUrl,
+      max: 1,
+      connectionTimeoutMillis: 5000,
+      statement_timeout: 5000,
+    });
+    try {
+      const result = await pool.query(
+        "UPDATE matches SET engine_state=$1::jsonb,revision=revision+1,updated_at=clock_timestamp() WHERE id=$2 AND revision=$3 AND status='active' AND ruleset_id='chaos-cat'",
+        [JSON.stringify(state), original.game.id, original.game.revision],
+      );
+      expect(result.rowCount).toBe(1);
+    } finally {
+      await pool.end();
+    }
+    await expect(players.host.locator('[data-square="e2"]')).toHaveAttribute("aria-label", /empty/);
+    await expect(players.host.locator('[data-square="e1"]')).toHaveAttribute(
+      "aria-label",
+      /exposed/,
+    );
+    await expect(players.friend.locator('[data-square="e1"]')).toHaveAttribute(
+      "aria-label",
+      /exposed/,
+    );
+    const exposed = (await readGame(players.friend)).game;
+    expect(exposed.position.threatenedKings).toEqual(["white"]);
+    expect(exposed.outcome).toBeNull();
+    await keyboardMove(players.friend, "e8", "e1");
+    await expect(
+      players.friend.getByRole("heading", { name: "Sam wins", exact: true }),
+    ).toBeVisible();
+    const finished = (await readGame(players.friend)).game;
+    expect(finished.outcome).toEqual({ winner: "black", reason: "king-captured" });
+    expect(finished.position.board.filter((piece) => piece.type === "k")).toEqual([
+      { square: "a8", type: "k", color: "black" },
+    ]);
+    expect(finished.position.legalMoves).toEqual([]);
+    await expect(players.host.getByText(/King captured/)).toBeVisible();
+    await players.host.reload();
+    await expect(players.host.getByText(/King captured/)).toBeVisible();
+    expect((await readGame(players.host)).game.outcome).toEqual(finished.outcome);
+  } finally {
     await closePlayers(players);
   }
 });

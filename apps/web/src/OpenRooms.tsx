@@ -1,5 +1,6 @@
 import { displayNameSchema, type OpenRoom, RULESETS, TIME_CONTROLS } from "@chess-room/contracts";
 import { useEffect, useRef, useState } from "react";
+import { Cat } from "./Cat";
 import { catChanceLabel } from "./catPresentation";
 import { ArrowIcon } from "./Icons";
 import { Modal } from "./Modal";
@@ -73,8 +74,15 @@ export function OpenRooms({
             return (
               <li className="open-room-card" key={room.id}>
                 <div className="open-room-host">
-                  <span className="avatar open-room-avatar" aria-hidden="true">
-                    {room.host.displayName.slice(0, 1).toUpperCase()}
+                  <span
+                    className={`avatar open-room-avatar${room.rulesetId === "catchess" || room.rulesetId === "chaos-cat" ? " open-room-avatar--cat" : ""}`}
+                    aria-hidden="true"
+                  >
+                    {room.rulesetId === "catchess" || room.rulesetId === "chaos-cat" ? (
+                      <Cat chaos={room.rulesetId === "chaos-cat"} />
+                    ) : (
+                      room.host.displayName.slice(0, 1).toUpperCase()
+                    )}
                   </span>
                   <div>
                     <h3>{room.host.displayName}</h3>
@@ -105,6 +113,12 @@ export function OpenRooms({
                         <dd>{catChanceLabel(room.catchess[room.host.color])}</dd>
                       </div>
                     </>
+                  )}
+                  {room.rulesetId === "chaos-cat" && (
+                    <div>
+                      <dt>The cat</dt>
+                      <dd>Every move · 50% gift / 50% steal</dd>
+                    </div>
                   )}
                 </dl>
                 <button

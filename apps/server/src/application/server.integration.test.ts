@@ -941,6 +941,8 @@ describe("HTTP and real Socket.IO game transport", () => {
       { rulesetId: "catchess", catchess: { host: "25", guest: 0 } },
       { rulesetId: "catchess", catchess: { host: 0, guest: 0, draw: "0".repeat(64) } },
       { rulesetId: "standard", catchess: { host: 25, guest: 25 } },
+      { rulesetId: "chaos-cat", catchess: { host: 25, guest: 25 } },
+      { rulesetId: "chaos-cat", chaos: { pawn: 50, queen: 50 } },
     ]) {
       const response = await application.server.inject({
         method: "POST",
@@ -953,99 +955,134 @@ describe("HTTP and real Socket.IO game transport", () => {
     const created = await create(cookie, application, "untimed", { rulesetId: "catchess" });
     expect(created.game.catchess).toEqual({ white: 25, black: 25 });
     expect(created.game.position.catEffects).toEqual([]);
+    const defaultResponse = await application.server.inject({
+      method: "POST",
+      url: "/api/games",
+      headers: { origin, cookie },
+      payload: {},
+    });
+    expect(defaultResponse.statusCode).toBe(201);
+    const defaultGame = publicGameSchema.parse(defaultResponse.json().game);
+    expect(defaultGame.rulesetId).toBe("catchess");
+    expect(defaultGame.catchess).toEqual({ white: 25, black: 25 });
   });
 
-  it("rejects client entropy and broadcasts authoritative Catchess effects across instances and reconnects", async () => {
-    const { whiteCookie, blackCookie, view } = await startedGame({
-      rulesetId: "catchess",
-      catchess: { host: 100, guest: -100 },
-    });
-    const secondDatabase = new Database(connectionString, { options: `-c search_path=${schema}` });
-    extraDatabases.push(secondDatabase);
-    const second = await buildApplication({
-      database: secondDatabase,
-      config: config(),
-      logger: false,
-      workers: false,
-    });
-    applications.push(second);
-    const addressOne = await application.server.listen({ port: 0, host: "127.0.0.1" });
-    const addressTwo = await second.server.listen({ port: 0, host: "127.0.0.1" });
-    const whiteSocket = await socketAt(addressOne, whiteCookie);
-    const blackSocket = await socketAt(addressTwo, blackCookie);
-    expect(gameViewSchema.parse(await subscribe(whiteSocket, view.game.id)).game.catchess).toEqual({
-      white: 100,
-      black: -100,
-    });
-    gameViewSchema.parse(await subscribe(blackSocket, view.game.id));
-    const move: GameCommand = {
-      protocolVersion: 1,
-      commandId: randomUUID(),
-      expectedRevision: 1,
-      action: { type: "move", from: "e2", to: "e4" },
-    };
-    for (const payload of [
-      { ...move, serverDraw: "0".repeat(64) },
-      { ...move, action: { ...move.action, draw: "0".repeat(64) } },
-      { ...move, catTurns: [{ draw: "0".repeat(64), effect: { action: "none" } }] },
-    ]) {
-      const response = await application.server.inject({
-        method: "POST",
-        url: `/api/games/${view.game.id}/commands`,
-        headers: { origin, cookie: whiteCookie },
-        payload,
+  it.each(["catchess", "chaos-cat"] as const)(
+    "rejects client entropy and broadcasts authoritative $0 effects across instances and reconnects",
+    async (rulesetId) => {
+      const { whiteCookie, blackCookie, view } = await startedGame({
+        rulesetId,
+        ...(rulesetId === "catchess" ? { catchess: { host: 100, guest: -100 } } : {}),
       });
-      expect(response.statusCode).toBe(400);
-    }
-    const whiteUpdate = updated(whiteSocket, 2);
-    const blackUpdate = updated(blackSocket, 2);
-    const response = await postCommand(whiteCookie, view.game.id, move);
-    expect(response.statusCode).toBe(200);
-    const accepted = gameViewSchema.parse(response.json());
-    await application.tick();
-    await second.tick();
-    const received = await Promise.all([whiteUpdate, blackUpdate]);
-    for (const update of received) {
-      const game = publicGameSchema.parse(update);
-      expect(game.position.fen).toBe(accepted.game.position.fen);
-      expect(game.position.board).toEqual(accepted.game.position.board);
-      expect(game.position.board).toHaveLength(33);
-      expect(game.position.catEffects).toEqual(accepted.game.position.catEffects);
-      expect(game.position.catEffects?.[0]).toMatchObject({
-        ply: 1,
-        color: "white",
-        action: "add",
+      const secondDatabase = new Database(connectionString, {
+        options: `-c search_path=${schema}`,
       });
-    }
-    expect(received[0]).toEqual(received[1]);
-    blackSocket.disconnect();
-    const laterResponse = await postCommand(
-      blackCookie,
-      view.game.id,
-      {
+      extraDatabases.push(secondDatabase);
+      const second = await buildApplication({
+        database: secondDatabase,
+        config: config(),
+        logger: false,
+        workers: false,
+      });
+      applications.push(second);
+      const addressOne = await application.server.listen({ port: 0, host: "127.0.0.1" });
+      const addressTwo = await second.server.listen({ port: 0, host: "127.0.0.1" });
+      const whiteSocket = await socketAt(addressOne, whiteCookie);
+      const blackSocket = await socketAt(addressTwo, blackCookie);
+      const subscribed = gameViewSchema.parse(await subscribe(whiteSocket, view.game.id));
+      expect(subscribed.game.rulesetId).toBe(rulesetId);
+      expect(subscribed.game.position.catEffects).toEqual([]);
+      if (rulesetId === "catchess")
+        expect(subscribed.game.catchess).toEqual({ white: 100, black: -100 });
+      else expect(subscribed.game).not.toHaveProperty("catchess");
+      gameViewSchema.parse(await subscribe(blackSocket, view.game.id));
+      const move: GameCommand = {
         protocolVersion: 1,
         commandId: randomUUID(),
-        expectedRevision: 2,
-        action: { type: "move", from: "e7", to: "e5" },
-      },
-      second,
-    );
-    expect(laterResponse.statusCode).toBe(200);
-    const later = gameViewSchema.parse(laterResponse.json());
-    expect(later.game.position.board).toHaveLength(32);
-    expect(later.game.position.catEffects?.[1]).toMatchObject({
-      ply: 2,
-      color: "black",
-      action: "remove",
-    });
-    expect(
-      gameViewSchema.parse((await postCommand(whiteCookie, view.game.id, move)).json()),
-    ).toEqual(accepted);
-    const reconnected = await socketAt(addressTwo, blackCookie);
-    const restored = gameViewSchema.parse(await subscribe(reconnected, view.game.id));
-    expect(restored.game.position).toEqual(later.game.position);
-    expect(restored.game.catchess).toEqual({ white: 100, black: -100 });
-  });
+        expectedRevision: 1,
+        action: { type: "move", from: "e2", to: "e4" },
+      };
+      for (const payload of [
+        { ...move, serverDraw: "0".repeat(64) },
+        { ...move, action: { ...move.action, draw: "0".repeat(64) } },
+        { ...move, action: { ...move.action, piece: "q" } },
+        { ...move, catTurns: [{ draw: "0".repeat(64), effect: { action: "none" } }] },
+      ]) {
+        const response = await application.server.inject({
+          method: "POST",
+          url: `/api/games/${view.game.id}/commands`,
+          headers: { origin, cookie: whiteCookie },
+          payload,
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      const whiteUpdate = updated(whiteSocket, 2);
+      const blackUpdate = updated(blackSocket, 2);
+      const response = await postCommand(whiteCookie, view.game.id, move);
+      expect(response.statusCode).toBe(200);
+      const accepted = gameViewSchema.parse(response.json());
+      await application.tick();
+      await second.tick();
+      const received = await Promise.all([whiteUpdate, blackUpdate]);
+      for (const update of received) {
+        const game = publicGameSchema.parse(update);
+        expect(game.position.fen).toBe(accepted.game.position.fen);
+        expect(game.position.board).toEqual(accepted.game.position.board);
+        expect(game.position.board).toHaveLength(
+          game.position.catEffects?.[0]?.action === "add" ? 33 : 31,
+        );
+        expect(game.position.catEffects).toEqual(accepted.game.position.catEffects);
+        expect(game.position.catEffects?.[0]).toMatchObject({
+          ply: 1,
+          color: "white",
+        });
+        const effect = game.position.catEffects?.[0];
+        if (rulesetId === "catchess") expect(effect?.action).toBe("add");
+        else {
+          expect(["add", "remove"]).toContain(effect?.action);
+          expect(["p", "r", "b", "n", "q"]).toContain(effect?.piece);
+          expect(game).not.toHaveProperty("catchess");
+        }
+      }
+      expect(received[0]).toEqual(received[1]);
+      blackSocket.disconnect();
+      const laterResponse = await postCommand(
+        blackCookie,
+        view.game.id,
+        {
+          protocolVersion: 1,
+          commandId: randomUUID(),
+          expectedRevision: 2,
+          action: { type: "move", from: "e7", to: "e5" },
+        },
+        second,
+      );
+      expect(laterResponse.statusCode).toBe(200);
+      const later = gameViewSchema.parse(laterResponse.json());
+      expect(later.game.position.board).toHaveLength(
+        accepted.game.position.board.length +
+          (later.game.position.catEffects?.[1]?.action === "add" ? 1 : -1),
+      );
+      expect(later.game.position.catEffects?.[1]).toMatchObject({
+        ply: 2,
+        color: "black",
+      });
+      if (rulesetId === "catchess")
+        expect(later.game.position.catEffects?.[1]?.action).toBe("remove");
+      expect(
+        gameViewSchema.parse((await postCommand(whiteCookie, view.game.id, move)).json()),
+      ).toEqual(accepted);
+      const reconnected = await socketAt(addressTwo, blackCookie);
+      const restored = gameViewSchema.parse(await subscribe(reconnected, view.game.id));
+      expect(restored.game.position).toEqual(later.game.position);
+      if (rulesetId === "catchess")
+        expect(restored.game.catchess).toEqual({ white: 100, black: -100 });
+      else {
+        expect(restored.game).not.toHaveProperty("catchess");
+        expect(restored.game.position.threatenedKings).toEqual(later.game.position.threatenedKings);
+      }
+    },
+  );
 
   it.each(["standard", "three-check"] as const)(
     "preserves the strict protocol-one $0 HTTP, socket and receipt shapes",
@@ -1360,7 +1397,7 @@ describe("HTTP and real Socket.IO game transport", () => {
     await expect(socketAt(address, cookie)).rejects.toMatchObject({ message: "CONNECTION_LIMIT" });
   });
 
-  it.each(["standard", "catchess"] as const)(
+  it.each(["standard", "catchess", "chaos-cat"] as const)(
     "sends no success or uncommitted $0 socket update when PostgreSQL rejects the commit",
     async (rulesetId) => {
       const { whiteCookie, view } = await startedGame({
@@ -1398,7 +1435,7 @@ describe("HTTP and real Socket.IO game transport", () => {
       const current = gameViewSchema.parse(currentResponse.json());
       expect(current.game.revision).toBe(1);
       expect(current.game.position.moves).toEqual([]);
-      if (rulesetId === "catchess") expect(current.game.position.catEffects).toEqual([]);
+      if (rulesetId !== "standard") expect(current.game.position.catEffects).toEqual([]);
       else expect(current.game.position).not.toHaveProperty("catEffects");
       expect(current.game.position.board).toHaveLength(32);
       expect(updates).toEqual([]);

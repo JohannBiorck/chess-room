@@ -1,7 +1,7 @@
 # Architecture
 
-Chess Room is a modular application with React, Fastify and PostgreSQL.
-Standard chess, Three-check and Catchess share one match service. Browsers render
+Cat Chess is a modular application with React, Fastify and PostgreSQL.
+Cat Chess, Chaos Cat, Standard chess and Three-check share one match service. Browsers render
 public state and submit actions; the server owns moves, revisions, clocks,
 random cat decisions and results.
 
@@ -26,13 +26,25 @@ or movement can introduce another engine behind the application boundary;
 the current adapters share standard movement and customize adjudication or
 post-move board effects.
 
-Catchess stores each player's signed chance and a server-generated random draw
+Cat Chess stores each player's signed chance and a server-generated random draw
 alongside each accepted move. The rules engine derives the cat effect from that
 draw, checks king safety and verifies the stored effect when replaying a game.
 Replay and reconnects therefore reproduce the same board without rerolling.
 Cat changes are part of a turn and happen before its final adjudication.
-Standard and Three-check retain their original public message shape. Catchess
+Standard and Three-check retain their original public message shape. Cat Chess
 snapshots additionally carry the signed settings and one cat effect per move.
+
+Chaos Cat uses its own immutable `chaos-cat` rules ID and version. It stores
+one random draw and effect per move, with an explicit non-king piece type and
+no adjustable chance settings. Independent weighted draws select giving or
+stealing, piece type and a uniform eligible square. A missing chosen piece
+does not reroll the type. Chaos effects can expose kings; the public projection
+identifies threatened kings without duplicating attack logic in the browser.
+Capturing a king ends the game before any further cat effect or ordinary draw
+adjudication. Replay reconstructs and verifies the same terminal board.
+
+The original `catchess` ID, signed settings, random derivation and pawn effect
+shape remain unchanged so existing games and receipts recover correctly.
 
 ## Commands
 
@@ -49,7 +61,7 @@ older revisions and retry uncertain requests with the same command identifier.
 Commands use HTTP; authorized Socket.IO subscriptions distribute snapshots.
 See [Socket.IO delivery guarantees](https://socket.io/docs/v4/delivery-guarantees/).
 
-Catchess entropy is generated inside the locked move execution after the
+Cat-mode entropy is generated inside the locked move execution after the
 receipt, authorization, revision and turn checks. Its move, cat effect and
 receipt commit atomically. Clients cannot choose the draw or a target square;
 they animate the committed effect received in the public snapshot.
@@ -131,7 +143,7 @@ time and adds increment. A bounded worker finishes overdue games without
 clients. A move at or after its deadline loses to timeout. Clocks continue
 through disconnection and restart.
 
-Rematches create a separate match and swap colors. Catchess chances follow the
+Rematches create a separate match and swap colors. Cat Chess chances follow the
 players to their new colors. Open waiting rooms close after one hour and private
 waiting rooms after 24 hours; the host's session expiry can close either sooner.
 The same deadline controls discovery, invitations, capacity, joins and recovery.

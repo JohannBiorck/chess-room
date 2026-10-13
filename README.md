@@ -1,8 +1,10 @@
-# Chess Room
+# Cat Chess
 
-Play chess in your browser. Choose Standard chess, Three-check or Catchess,
-then create a private invitation room or an open room that other visitors
-can join. Players use display names without accounts.
+Play chess with mischievous cats in your browser. Cat Chess is the default
+mode, with a helpful or evil pawn cat for each player. Try Chaos Cat for
+unpredictable gifts and thefts, or choose Standard chess or Three-check.
+Create a private invitation room or an open room that other visitors can join.
+Players use display names without accounts.
 
 Use the name button in the header to change your display name in the lobby
 or during a game. Your browser session and seat stay the same. Open rooms
@@ -14,10 +16,18 @@ Hosts can close a waiting room using **Close room**, with a confirmation before
 its invitation and open seat become unavailable. An open room closes after one
 hour without an opponent. Games that have already started continue normally.
 
-In Catchess, each player has their own cat. Adjust each cat's slider in the
+In Cat Chess, each player has their own cat. Adjust each cat's slider in the
 lobby: a positive percentage can add a pawn on that player's half of the board;
 a negative percentage can remove one of their pawns. The cat acts after its
 player moves, with an animation and an entry in the move history.
+
+In Chaos Cat, the cat always attempts an action after its owner's move:
+50% to give a piece and 50% to steal one. Pawns have a 50% selection chance;
+rooks, bishops, knights and queens each have 12.5%. A missing piece of the
+chosen type means no theft; the probabilities are never reweighted. Kings
+are never given or stolen. A theft can expose your king, and your opponent
+wins by capturing it. Both players see the actual piece in the cat animation
+and history. Read the complete [Chaos Cat rules](docs/rules.md#chaos-cat-version-1).
 
 The server validates every move and stores games in PostgreSQL. Refreshing or
 reconnecting restores the board, history, result and clock. Supported controls
@@ -28,7 +38,7 @@ Legal moves appear immediately on your board while the server confirms them.
 Confirmed moves and cat visits are shared with both players; a rejected move
 restores the saved position.
 
-[Play Chess Room online](https://chess-room-c09w.onrender.com). The free service
+[Play Cat Chess online](https://chess-room-c09w.onrender.com). The free service
 can take approximately a minute to wake after inactivity. Read
 [hosting limits](docs/hosting.md) before starting a timed game.
 
@@ -49,7 +59,7 @@ npm run db:migrate
 npm run dev
 ```
 
-Open [Chess Room locally](http://127.0.0.1:5173). Create a room and open its
+Open [Cat Chess locally](http://127.0.0.1:5173). Create a room and open its
 invitation in another browser or an incognito window for the second player.
 Alternatively, create an open room and join it from the second browser's
 home page.
@@ -85,7 +95,9 @@ Do not delete its volume to resolve a credential mismatch.
 Integration tests require `DATABASE_URL` and `ADMIN_DATABASE_URL` for a
 disposable local database. They create and remove isolated schemas and roles
 to verify runtime permissions. Use local test credentials, never production
-connections. Browser tests create synthetic application games.
+connections. Browser tests create synthetic application games and require a
+loopback PostgreSQL connection for the deterministic Chaos Cat king-capture
+fixture; they reject remote database connections for that setup.
 On Windows, set `PLAYWRIGHT_CHANNEL=msedge` to use installed Edge.
 
 CI verifies Windows and Linux builds, PostgreSQL role privileges, integration

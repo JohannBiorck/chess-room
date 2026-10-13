@@ -218,7 +218,9 @@ export class GameService {
     const enginePosition = inspectEngine(state);
     const { catEffects, ...legacyPosition } = enginePosition;
     const position =
-      state.rulesetId === "catchess" ? { ...legacyPosition, catEffects } : legacyPosition;
+      state.rulesetId === "catchess" || state.rulesetId === "chaos-cat"
+        ? { ...legacyPosition, catEffects }
+        : legacyPosition;
     const life = lifecycle(game);
     return {
       id: game.id,
@@ -749,7 +751,9 @@ export class GameService {
             to: action.to,
             ...(action.promotion ? { promotion: action.promotion } : {}),
           },
-          state.rulesetId === "catchess" ? this.serverDraw() : undefined,
+          state.rulesetId === "catchess" || state.rulesetId === "chaos-cat"
+            ? this.serverDraw()
+            : undefined,
         );
         if (life.remaining && life.turnStartedAt !== null) {
           life.remaining[seat] =

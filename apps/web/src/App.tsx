@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
+import { Cat } from "./Cat";
 import { DisplayNameEditor } from "./DisplayNameEditor";
 import { GameRoom } from "./GameRoom";
 import { Lobby } from "./Lobby";
-import { Piece } from "./Piece";
 import { useChessRoom } from "./useChessRoom";
 
 export function App() {
@@ -30,12 +30,12 @@ export function App() {
             }}
           >
             <span className="brand-piece">
-              <Piece type="n" color="black" />
+              <Cat />
             </span>
-            Chess Room<span className="brand-period">.</span>
+            Cat Chess<span className="brand-period">.</span>
           </a>
           <div className="header-meta">
-            <span className="header-caption">Good company. Great chess.</span>
+            <span className="header-caption">A little chess. A little mischief.</span>
             {room.session && (
               <button
                 type="button"
@@ -119,7 +119,7 @@ export function App() {
         {room.loading ? (
           <main id="main" className="loading-panel" tabIndex={-1}>
             <span className="loading-ring" aria-hidden="true" />
-            <h1>Setting your table…</h1>
+            <h1>Waking the cats…</h1>
             <p role="status">Connecting to your guest session.</p>
           </main>
         ) : room.view ? (
@@ -156,9 +156,9 @@ export function App() {
           />
         )}
         <footer className="site-footer">
-          <span className="footer-brand">Chess Room</span>
-          <p>Pull up a chair. Share a game. One more move.</p>
-          <span>STANDARD · THREE-CHECK · CATCHESS</span>
+          <span className="footer-brand">Cat Chess</span>
+          <p>Good friends. Curious cats. One more move.</p>
+          <span>CAT CHESS · CHAOS CAT · CLASSICS</span>
         </footer>
       </div>
       {editingName && room.session && (

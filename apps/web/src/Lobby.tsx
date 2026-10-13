@@ -9,6 +9,7 @@ import {
 import { useEffect, useState } from "react";
 import { Cat } from "./Cat";
 import { CatchessSettings } from "./CatchessSettings";
+import { ChaosCatRules } from "./ChaosCatRules";
 import { ArrowIcon, LinkIcon, ShieldIcon } from "./Icons";
 import { OpenRooms } from "./OpenRooms";
 import { Piece, type PieceKind } from "./Piece";
@@ -33,17 +34,21 @@ function TableIllustration() {
   return (
     <div className="table-illustration" aria-hidden="true">
       <div className="illustration-caption">
-        <span className="little-dot" /> A seat for you. A seat for a friend.
+        <span className="little-dot" /> TWO PLAYERS. ONE VERY CURIOUS CAT.
       </div>
       <div className="illustration-board">
         {Array.from({ length: 64 }, (_, index) => {
           const row = Math.floor(index / 8);
           const column = index % 8;
           const type =
-            row === 0 || row === 7 ? backRank[column] : row === 1 || row === 6 ? "p" : null;
+            row === 0 || row === 7
+              ? backRank[column]
+              : row === 1 || row === 6 || (row === 5 && column === 2)
+                ? "p"
+                : null;
           return (
             <span
-              className={`illustration-square ${(row + column) % 2 ? "illustration-square--dark" : ""}`}
+              className={`illustration-square ${(row + column) % 2 ? "illustration-square--dark" : ""}${row === 5 && column === 2 ? " illustration-square--gift" : ""}`}
               key={`${row}-${column}`}
             >
               {type && <Piece type={type} color={row < 2 ? "black" : "white"} />}
@@ -51,9 +56,16 @@ function TableIllustration() {
           );
         })}
       </div>
+      <span className="hero-cat hero-cat--helpful">
+        <Cat />
+      </span>
+      <span className="hero-cat hero-cat--chaos">
+        <Cat color="black" chaos evil />
+      </span>
+      <span className="hero-cat-note">Your move. Their mischief.</span>
       <div className="illustration-note">
-        <span>01 / THREE WAYS TO PLAY</span>
-        <span>YOUR NEXT MOVE</span>
+        <span>THE BOARD HAS A NEW REGULAR</span>
+        <span>MEET CAT CHESS</span>
       </div>
     </div>
   );
@@ -75,7 +87,7 @@ export function Lobby({
 }: LobbyProps) {
   const [displayName, setDisplayName] = useState(session?.displayName ?? "");
   const [settings, setSettings] = useState<CreateGame>({
-    rulesetId: "standard",
+    rulesetId: "catchess",
     timeControl: "untimed",
     color: "random",
   });
@@ -84,6 +96,13 @@ export function Lobby({
   const [tab, setTab] = useState<"create" | "join">(initialInvitation ? "join" : "create");
   const rules = RULESETS.find((entry) => entry.id === settings.rulesetId);
   const isOpen = settings.visibility === "open";
+  const modeOrder: Record<string, number> = {
+    catchess: 0,
+    "chaos-cat": 1,
+    standard: 2,
+    "three-check": 3,
+  };
+  const modes = [...RULESETS].sort((a, b) => (modeOrder[a.id] ?? 4) - (modeOrder[b.id] ?? 4));
 
   useEffect(() => {
     if (session?.displayName) setDisplayName(session.displayName);
@@ -94,16 +113,16 @@ export function Lobby({
       <section className="lobby-intro" aria-labelledby="page-heading">
         <div>
           <p className="eyebrow">
-            <span className="little-dot" /> PLAY TOGETHER, WHEREVER YOU ARE
+            <span className="little-dot" /> CHESS WITH FRIENDS. AND A TWIST.
           </p>
           <h1 id="page-heading">
-            Good company.
+            Good chess.
             <br />
-            Great chess.
+            <span className="hero-heading-accent">Curious cats.</span>
           </h1>
           <p className="introduction">
-            A board for good company. Invite a friend or join an open room, take your seats, and
-            make your next move.
+            Bring a friend. Meet the cat. Play chess with a little luck, a little mischief, and a
+            board that never quite goes to plan.
           </p>
           <div className="hero-details">
             <span>
@@ -131,11 +150,11 @@ export function Lobby({
 
       <section className="lobby-controls" aria-labelledby="room-heading">
         <div className="room-description">
-          <p className="eyebrow">YOUR ROOM, YOUR GAME</p>
-          <h2 id="room-heading">Pull up a chair.</h2>
+          <p className="eyebrow">YOUR ROOM, YOUR KIND OF MISCHIEF</p>
+          <h2 id="room-heading">Make yourself at home.</h2>
           <p>
-            Keep it classic or try a new challenge. Every move is checked, and your game stays with
-            you when you reconnect.
+            Tune a helpful or mischievous cat, let Chaos Cat take over, or keep it classic. Your
+            game stays with you when you reconnect.
           </p>
           <div className="small-rule">
             <span>01</span>
@@ -154,8 +173,8 @@ export function Lobby({
           <div className="small-rule">
             <span>03</span>
             <div>
-              <h3>Meet at the board</h3>
-              <p>Make the first move and enjoy the game.</p>
+              <h3>Let the mischief begin</h3>
+              <p>Make your move. See what the cat has in mind.</p>
             </div>
           </div>
         </div>
@@ -272,7 +291,7 @@ export function Lobby({
                 <fieldset className="mode-field">
                   <legend>Game mode</legend>
                   <div className="mode-options">
-                    {RULESETS.map((mode) => (
+                    {modes.map((mode) => (
                       <label
                         className={
                           settings.rulesetId === mode.id
@@ -290,20 +309,29 @@ export function Lobby({
                           disabled={busy}
                         />
                         <span className="mode-piece">
-                          {mode.id === "catchess" ? (
-                            <Cat />
+                          {mode.id === "catchess" || mode.id === "chaos-cat" ? (
+                            <Cat chaos={mode.id === "chaos-cat"} evil={mode.id === "chaos-cat"} />
                           ) : (
                             <Piece type={mode.id === "standard" ? "k" : "n"} color="black" />
                           )}
                         </span>
                         <span>
-                          <strong>{mode.label}</strong>
+                          <strong>
+                            {mode.label}
+                            {mode.id === "catchess" && (
+                              <span className="mode-badge" aria-hidden="true">
+                                THE ORIGINAL
+                              </span>
+                            )}
+                          </strong>
                           <small>
-                            {mode.id === "standard"
-                              ? "The game you know"
-                              : mode.id === "three-check"
-                                ? "Three checks. A new challenge."
-                                : "A little luck. A little mischief."}
+                            {mode.id === "chaos-cat"
+                              ? "Every move. A gift or a theft."
+                              : mode.id === "standard"
+                                ? "The game you know"
+                                : mode.id === "three-check"
+                                  ? "Three checks. A new challenge."
+                                  : "A little luck. A little mischief."}
                           </small>
                         </span>
                       </label>
@@ -314,6 +342,7 @@ export function Lobby({
                 {settings.rulesetId === "catchess" && (
                   <CatchessSettings value={catSettings} disabled={busy} onChange={setCatSettings} />
                 )}
+                {settings.rulesetId === "chaos-cat" && <ChaosCatRules />}
                 <div className="form-row">
                   <div className="form-field">
                     <label htmlFor="time-control">Time control</label>

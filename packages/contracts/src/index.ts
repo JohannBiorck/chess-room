@@ -5,7 +5,7 @@ export const MAX_GAME_PLIES = 1200;
 export const MAX_OPEN_ROOMS = 50;
 export const OPEN_ROOM_LIFETIME_MS = 60 * 60 * 1000;
 
-export const rulesetIdSchema = z.enum(["standard", "three-check", "catchess"]);
+export const rulesetIdSchema = z.enum(["standard", "three-check", "catchess", "chaos-cat"]);
 export const colorSchema = z.enum(["white", "black"]);
 export const squareSchema = z.string().regex(/^[a-h][1-8]$/);
 export const promotionSchema = z.enum(["q", "r", "b", "n"]);
@@ -23,6 +23,19 @@ export const displayNameSchema = z
 
 export const RULESETS = [
   {
+    id: "catchess",
+    version: 1,
+    label: "Cat Chess",
+    description: "Your cat may grant or steal a pawn after each move. Set each player's chance.",
+  },
+  {
+    id: "chaos-cat",
+    version: 1,
+    label: "Chaos Cat",
+    description:
+      "A cat always tries to grant or steal a random piece. Exposed kings can be captured.",
+  },
+  {
     id: "standard",
     version: 1,
     label: "Standard chess",
@@ -33,12 +46,6 @@ export const RULESETS = [
     version: 1,
     label: "Three-check",
     description: "Standard legal moves. Deliver three checks to win; checkmate also wins.",
-  },
-  {
-    id: "catchess",
-    version: 1,
-    label: "Catchess",
-    description: "After each move, a helpful cat may add your pawn or an evil cat may remove one.",
   },
 ] as const;
 
@@ -59,7 +66,7 @@ export const catchessConfigSchema = z
   .strict();
 export const createGameSchema = z
   .object({
-    rulesetId: rulesetIdSchema.default("standard"),
+    rulesetId: rulesetIdSchema.default("catchess"),
     color: z.enum(["random", "white", "black"]).default("random"),
     timeControl: timeControlSchema.default("untimed"),
     catchess: catchessSettingsSchema.optional(),
@@ -121,6 +128,7 @@ export const gameCommandSchema = z
 export const drawClaimSchema = z.enum(["threefold-repetition", "fifty-move"]);
 export const outcomeReasonSchema = z.enum([
   "checkmate",
+  "king-captured",
   "stalemate",
   "dead-position",
   "three-check",
@@ -155,12 +163,14 @@ export const moveRecordSchema = z
     san: z.string().max(32),
   })
   .strict();
+export const catPieceSchema = z.enum(["p", "r", "b", "n", "q"]);
 export const catEffectSchema = z
   .object({
     ply: z.number().int().min(1).max(MAX_GAME_PLIES),
     color: colorSchema,
     action: z.enum(["add", "remove", "none"]),
     square: squareSchema.optional(),
+    piece: catPieceSchema.optional(),
   })
   .strict()
   .refine(
@@ -173,6 +183,11 @@ export const enginePositionSchema = z
     fen: z.string().max(128),
     turn: colorSchema,
     inCheck: z.boolean(),
+    threatenedKings: z
+      .array(colorSchema)
+      .max(2)
+      .refine((kings) => new Set(kings).size === kings.length, "Threatened kings must be distinct.")
+      .optional(),
     board: z.array(boardPieceSchema).max(64),
     legalMoves: z.array(moveInputSchema).max(2048),
     moves: z.array(moveRecordSchema).max(MAX_GAME_PLIES),
@@ -249,15 +264,17 @@ export const publicGameSchema = z
         code: "custom",
         message: "Closed rooms must be unplayed and have no chess result or rematch.",
       });
-    if (game.rulesetId === "catchess") {
+    const catMode = game.rulesetId === "catchess" || game.rulesetId === "chaos-cat";
+    if (catMode) {
       if (
-        !game.catchess ||
+        (game.rulesetId === "catchess" && !game.catchess) ||
+        (game.rulesetId === "chaos-cat" && game.catchess !== undefined) ||
         !game.position.catEffects ||
         game.position.catEffects.length !== game.position.moves.length
       ) {
         context.addIssue({
           code: "custom",
-          message: "Catchess requires settings and one effect per move.",
+          message: "Cat modes require one effect per move and settings only for Cat Chess.",
         });
       } else if (
         game.position.moves.some(
@@ -268,12 +285,38 @@ export const publicGameSchema = z
       ) {
         context.addIssue({ code: "custom", message: "Cat effects must match their moves." });
       }
+      if (
+        game.position.catEffects?.some((effect, index) =>
+          game.rulesetId === "catchess"
+            ? effect.piece !== undefined
+            : effect.piece === undefined &&
+              !(
+                effect.action === "none" &&
+                index === game.position.moves.length - 1 &&
+                game.position.outcome?.reason === "king-captured"
+              ),
+        )
+      )
+        context.addIssue({
+          code: "custom",
+          message: "Only Chaos Cat effects include piece types.",
+        });
     } else if (game.catchess !== undefined || game.position.catEffects !== undefined) {
       context.addIssue({
         code: "custom",
         message: "Existing modes omit cat fields from the public protocol.",
       });
     }
+    if (game.rulesetId !== "chaos-cat" && game.position.threatenedKings !== undefined)
+      context.addIssue({ code: "custom", message: "Exposed kings apply only to Chaos Cat." });
+    if (
+      (game.outcome?.reason === "king-captured" ||
+        game.position.outcome?.reason === "king-captured") &&
+      (game.rulesetId !== "chaos-cat" ||
+        game.outcome?.winner === null ||
+        game.position.outcome?.winner === null)
+    )
+      context.addIssue({ code: "custom", message: "Only Chaos Cat can end in a king capture." });
   });
 export const gameViewSchema = z
   .object({ game: publicGameSchema, seat: colorSchema.nullable() })
@@ -308,6 +351,7 @@ export const openRoomsSchema = z
 export type RulesetId = z.infer<typeof rulesetIdSchema>;
 export type CatchessSettings = z.infer<typeof catchessSettingsSchema>;
 export type CatchessConfig = z.infer<typeof catchessConfigSchema>;
+export type CatPiece = z.infer<typeof catPieceSchema>;
 export type CatEffect = z.infer<typeof catEffectSchema>;
 export type Color = z.infer<typeof colorSchema>;
 export type Square = z.infer<typeof squareSchema>;

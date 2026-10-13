@@ -40,6 +40,8 @@ type BoardProps = {
   seat: Color | null;
   turn: Color;
   inCheck: boolean;
+  kingCapture: boolean;
+  threatenedKings: Color[];
   canMove: boolean;
   busy: boolean;
   revision: number;
@@ -57,6 +59,8 @@ export function Board({
   seat,
   turn,
   inCheck,
+  kingCapture,
+  threatenedKings,
   canMove,
   busy,
   revision,
@@ -73,7 +77,7 @@ export function Board({
   const effect = visit.active;
   const targetPiece = effect?.square ? bySquare.get(effect.square) : undefined;
   const depictsCurrentPosition = effect !== null && effect.ply === latestPly;
-  const hideArrivingPawn =
+  const hideArrivingPiece =
     depictsCurrentPosition && effect?.action === "add" && visit.phase !== "exit";
 
   useEffect(() => {
@@ -117,14 +121,18 @@ export function Board({
                   const file = square.charCodeAt(0) - 97;
                   const dark = (rank + file) % 2 === 0;
                   const target = available.some((move) => move.to === square);
-                  const checked = inCheck && piece?.type === "k" && piece.color === turn;
+                  const checked =
+                    piece?.type === "k" &&
+                    (kingCapture
+                      ? threatenedKings.includes(piece.color)
+                      : inCheck && piece.color === turn);
                   const last = lastMove?.from === square || lastMove?.to === square;
-                  const pendingPawn =
-                    hideArrivingPawn &&
+                  const pendingPiece =
+                    hideArrivingPiece &&
                     square === effect?.square &&
-                    piece?.type === "p" &&
+                    piece?.type === (effect?.piece ?? "p") &&
                     piece.color === effect.color;
-                  const label = `${square}, ${piece ? `${piece.color} ${pieceNames[piece.type]}` : "empty"}${selected === square ? ", selected" : ""}${target ? ", legal destination" : ""}${checked ? ", in check" : ""}`;
+                  const label = `${square}, ${piece ? `${piece.color} ${pieceNames[piece.type]}` : "empty"}${selected === square ? ", selected" : ""}${target ? ", legal destination" : ""}${checked ? (kingCapture ? ", king exposed" : ", in check") : ""}`;
                   return (
                     <td key={square}>
                       <button
@@ -172,7 +180,7 @@ export function Board({
                         {piece && (
                           <span
                             className={
-                              pendingPawn ? "board-piece board-piece--cat-arrival" : "board-piece"
+                              pendingPiece ? "board-piece board-piece--cat-arrival" : "board-piece"
                             }
                           >
                             <Piece type={piece.type} color={piece.color} />
@@ -198,11 +206,11 @@ export function Board({
             effect={effect}
             orientation={orientation}
             phase={visit.phase}
-            showPawn={
+            showPiece={
               depictsCurrentPosition &&
               (effect.action === "remove"
                 ? targetPiece === undefined
-                : targetPiece?.type === "p" && targetPiece.color === effect.color)
+                : targetPiece?.type === (effect.piece ?? "p") && targetPiece.color === effect.color)
             }
           />
         )}

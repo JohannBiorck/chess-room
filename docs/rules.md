@@ -2,7 +2,7 @@
 
 Each game records its ruleset and rules version. The server validates moves;
 the browser's board and move hints are a public projection of that state.
-Version 1 supports standard chess, Three-check and Catchess. All use
+Version 1 supports Cat Chess, Chaos Cat, standard chess and Three-check. All use
 the standard starting position and legal movement rules, including castling,
 en passant and promotion to a queen, rook, bishop or knight.
 
@@ -51,7 +51,9 @@ Only bare kings automatically draw for dead material. A bishop or knight can
 still deliver three checks, so the standard single-minor-piece draw does not
 apply in this mode.
 
-## Catchess, version 1
+## Cat Chess, version 1
+
+Cat Chess retains the `catchess` rules ID used by saved games.
 
 Each player has an independent signed cat chance from -100 to 100. Positive
 values mean a helpful cat adds one of that player's pawns; negative values mean
@@ -88,9 +90,55 @@ Accepted turns persist both their server-generated random input and their
 resulting effect. Replay recomputes and verifies every effect without drawing
 again. Refreshes, reconnects and accepted-command retries cannot reroll a turn.
 The public game contains the resulting effects, never the random inputs.
-Catchess PGN downloads retain every move, signed chance headers and a cat
+Cat Chess PGN downloads retain every move, signed chance headers and a cat
 comment after each turn. They are annotated variant records; importing them
 into an ordinary chess PGN reader will not reproduce the cat mutations.
+
+## Chaos Cat, version 1
+
+Chaos Cat has no chance sliders: the cat attempts an action after every move,
+with a 50% chance to give a piece and a 50% chance to steal a piece. It draws
+the piece type independently using these fixed probabilities:
+
+| Piece | Selection probability |
+| --- | ---: |
+| Pawn | 50% |
+| Rook | 12.5% |
+| Bishop | 12.5% |
+| Knight | 12.5% |
+| Queen | 12.5% |
+| King | Never |
+
+Giving chooses uniformly among empty squares on the mover's own half: white
+ranks 1–4 or black ranks 5–8, including back ranks. The piece belongs to the
+mover. Stealing chooses uniformly among that player's pieces of the drawn
+type anywhere on the board. If there is no matching piece to steal, or no
+empty home-half square for a gift, the board is unchanged. There is no reroll
+or redistribution to the remaining piece types.
+
+Ordinary moves follow standard chess legality. Unlike the pawn cat, Chaos Cat
+does not filter changes for king safety: removing a shielding piece can leave
+its owner's king exposed. Both kings' threats are displayed. The opponent may
+capture the exposed king with an otherwise legal move and wins immediately
+with reason `king-captured`. A winning king capture has no subsequent cat
+mutation. Checkmate still wins after an ordinary complete turn, and stalemate
+still draws. Kings are never selected for giving or stealing.
+
+A rook removed from its original square permanently loses that castling
+right. Giving a rook never restores castling rights. Pawn movement,
+promotion and en-passant follow the Cat Chess policy above; unrelated effects
+preserve en-passant while removing its victim or occupying its destination
+clears it. Every applied gift or theft resets the half-move draw counter.
+
+No material-only dead-position draw applies because either cat can create
+future winning material. Repetition, half-move claims, agreed draws, clocks,
+move limits and rematches remain available. Both players can win on time even
+from bare kings because their cats can supply new pieces.
+
+Random inputs and piece effects are saved atomically with each accepted move.
+Retries, refreshes and replays do not redraw them. Chaos Cat PGN includes its
+variant header and piece-aware cat comments. It is an annotated variant record;
+an ordinary chess PGN reader cannot recreate the cat mutations.
 
 ## Clocks and lifecycle
 
@@ -108,7 +156,7 @@ knights and cases where the opponent's pieces could help block its own king.
 This is a conservative material test rather than a general position solver.
 In Three-check, any piece other than a king is treated as capable of winning
 on time because it may deliver three checks.
-In Catchess, a player with a positive chance is treated as able to create
+In Cat Chess, a player with a positive chance is treated as able to create
 future mating material. A bare king without that ability cannot win on time.
 With an opponent who can add pawns, an existing bishop or knight may also use
 that future opposing material in a possible mate. Otherwise the standard

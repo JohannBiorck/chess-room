@@ -1,9 +1,17 @@
 import type { Color } from "@chess-room/contracts";
 
-export function Cat({ color = "white", evil = false }: { color?: Color; evil?: boolean }) {
+export function Cat({
+  color = "white",
+  evil = false,
+  chaos = false,
+}: {
+  color?: Color;
+  evil?: boolean;
+  chaos?: boolean;
+}) {
   return (
     <svg
-      className={`cat-illustration cat-illustration--${color}${evil ? " cat-illustration--evil" : ""}`}
+      className={`cat-illustration cat-illustration--${color}${evil ? " cat-illustration--evil" : ""}${chaos ? " cat-illustration--chaos" : ""}`}
       viewBox="0 0 120 100"
       aria-hidden="true"
       focusable="false"

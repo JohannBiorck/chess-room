@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Cat Chess</title>
+  <rect width="64" height="64" rx="16" fill="#254e45"/>
+  <path d="m14 27-1-17 16 9h6l16-9-1 17c8 17-2 28-18 28S6 44 14 27Z" fill="#e9b878" stroke="#fbedd9" stroke-width="2" stroke-linejoin="round"/>
+  <path d="m18 17 1 9 6-5m21-4-1 9-6-5" fill="#db8b69"/>
+  <ellipse cx="23" cy="34" rx="3" ry="4" fill="#254e45"/>
+  <ellipse cx="41" cy="34" rx="3" ry="4" fill="#254e45"/>
+  <path d="m29 41 6 0-3 4m0 0v3m0 0c-3 3-5 3-7 1m7-1c3 3 5 3 7 1m-20-8-10-2m10 7-10 2m36-7 10-2m-10 7 10 2" fill="none" stroke="#254e45" stroke-width="2" stroke-linecap="round"/>
+</svg>

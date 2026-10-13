@@ -16,7 +16,7 @@ const effects: CatEffect[] = [
   { ply: 3, color: "white", action: "remove", square: "a2" },
 ];
 
-describe("Catchess presentation", () => {
+describe("Cat Chess presentation", () => {
   it("announces a later identical cat action as a new move", () => {
     const first: CatEffect = { ply: 1, color: "white", action: "add", square: "c3" };
     const later: CatEffect = { ...first, ply: 5 };
@@ -47,6 +47,24 @@ describe("Catchess presentation", () => {
     expect(catEffectDescription(effects[2] as CatEffect)).toBe(
       "White’s cat removed a pawn from a2.",
     );
+  });
+
+  it("names each Chaos Cat piece in history and live announcements", () => {
+    for (const [piece, name] of [
+      ["p", "pawn"],
+      ["r", "rook"],
+      ["b", "bishop"],
+      ["n", "knight"],
+      ["q", "queen"],
+    ] as const) {
+      const gift: CatEffect = { ply: 1, color: "white", action: "add", square: "c3", piece };
+      const steal: CatEffect = { ply: 2, color: "black", action: "remove", square: "f6", piece };
+      expect(catEffectDescription(gift)).toBe(`White’s cat added a ${name} on c3.`);
+      expect(catEffectAnnouncement(steal)).toBe(`Move 2: Black’s cat removed a ${name} from f6.`);
+      expect(catEffectDescription({ ply: 3, color: "white", action: "none", piece })).toBe(
+        `White’s cat picked a ${name} and made no change.`,
+      );
+    }
   });
 
   it("does not animate history on initial load, a snapshot, a reconnect, or a different room", () => {

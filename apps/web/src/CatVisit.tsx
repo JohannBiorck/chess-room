@@ -72,12 +72,12 @@ export function useCatVisit(gameId: string, effects: CatEffect[]) {
 export function CatVisit({
   effect,
   orientation,
-  showPawn,
+  showPiece,
   phase,
 }: {
   effect: CatEffect;
   orientation: Color;
-  showPawn: boolean;
+  showPiece: boolean;
   phase: string;
 }) {
   if (!effect.square || effect.action === "none") return null;
@@ -99,18 +99,25 @@ export function CatVisit({
         data-cat-ply={effect.ply}
         data-cat-square={effect.square}
         data-cat-action={effect.action}
+        data-cat-piece={effect.piece ?? "p"}
         data-cat-phase={phase}
         data-cat-edge={ownEdge ? "bottom" : "top"}
       >
         <span className="cat-square-glow" />
-        {showPawn && (
-          <span className={`cat-action-pawn cat-action-pawn--${effect.action}`}>
-            <Piece type="p" color={effect.color} />
+        {showPiece && (
+          <span
+            className={`cat-action-piece cat-action-piece--${effect.action} cat-action-pawn cat-action-pawn--${effect.action}`}
+          >
+            <Piece type={effect.piece ?? "p"} color={effect.color} />
           </span>
         )}
         <div className="cat-travel">
           <div className="cat-sprite">
-            <Cat color={effect.color} evil={effect.action === "remove"} />
+            <Cat
+              color={effect.color}
+              evil={effect.action === "remove"}
+              chaos={effect.piece !== undefined}
+            />
           </div>
         </div>
         <span className="cat-action-spark" />

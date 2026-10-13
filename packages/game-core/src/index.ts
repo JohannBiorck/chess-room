@@ -17,7 +17,8 @@ import {
 } from "@chess-room/contracts";
 import { Chess, type Square as ChessSquare, DEFAULT_POSITION, type Move } from "chess.js";
 import { z } from "zod";
-import { applyCatEffect } from "./catchess.js";
+import { applyCatEffect, derivedCatchessPosition } from "./catchess.js";
+import { applyChaosCatEffect } from "./chaos-cat.js";
 import { CHESS_RULES_ADAPTERS, type ChessRulesAdapter } from "./rules.js";
 
 export const RULES_VERSION = 1;
@@ -47,6 +48,16 @@ export const engineStateSchema = z
           message: "Catchess requires settings and one cat turn per move.",
         });
       }
+    } else if (state.rulesetId === "chaos-cat") {
+      if (
+        state.catchess !== undefined ||
+        !state.catTurns ||
+        state.catTurns.length !== state.moves.length
+      )
+        context.addIssue({
+          code: "custom",
+          message: "Chaos Cat needs one cat turn per move and no settings.",
+        });
     } else if (state.catchess !== undefined || state.catTurns !== undefined) {
       context.addIssue({ code: "custom", message: "Cat state applies only to Catchess." });
     }
@@ -78,6 +89,7 @@ type Replay = {
   records: MoveRecord[];
   catEffects: CatEffect[];
   adapter: ChessRulesAdapter;
+  kingCapture: GameOutcome | null;
 };
 
 function color(value: "w" | "b"): Color {
@@ -116,6 +128,7 @@ function board(chess: Chess): BoardPiece[] {
 }
 
 function outcome(replay: Replay): GameOutcome | null {
+  if (replay.kingCapture) return replay.kingCapture;
   const turn = color(replay.chess.turn());
   if (replay.chess.isCheckmate()) return { winner: oppositeColor(turn), reason: "checkmate" };
   const extraOutcome = replay.adapter.extraOutcome(replay.checks);
@@ -154,8 +167,9 @@ function play(
         move.from === input.from && move.to === input.to && move.promotion === input.promotion,
     );
   if (!valid) throw new EngineError("illegal-move", "That move is not legal in this position.");
-  if (replay.state.rulesetId === "catchess" && !serverDrawSchema.safeParse(draw).success) {
-    throw new EngineError("invalid-state", "Catchess needs a valid server random draw.");
+  const catMode = replay.state.rulesetId === "catchess" || replay.state.rulesetId === "chaos-cat";
+  if (catMode && !serverDrawSchema.safeParse(draw).success) {
+    throw new EngineError("invalid-state", "Cat modes need a valid server random draw.");
   }
   const accepted = replay.chess.move({
     from: input.from as ChessSquare,
@@ -164,20 +178,29 @@ function play(
   });
   const mover = color(accepted.color);
   let catTurn: CatTurn | null = null;
-  if (replay.state.rulesetId === "catchess") {
-    const result = applyCatEffect(
-      replay.chess,
-      mover,
-      replay.state.catchess?.[mover] ?? 0,
-      draw ?? "",
-      replay.records.length + 1,
-    );
+  if (catMode) {
+    const capturedKing = replay.state.rulesetId === "chaos-cat" && accepted.captured === "k";
+    const result = capturedKing
+      ? {
+          chess: derivedCatchessPosition(replay.chess.fen({ forceEnpassantSquare: true })),
+          effect: { ply: replay.records.length + 1, color: mover, action: "none" as const },
+        }
+      : replay.state.rulesetId === "chaos-cat"
+        ? applyChaosCatEffect(replay.chess, mover, draw ?? "", replay.records.length + 1)
+        : applyCatEffect(
+            replay.chess,
+            mover,
+            replay.state.catchess?.[mover] ?? 0,
+            draw ?? "",
+            replay.records.length + 1,
+          );
     if (
       expectedEffect &&
       (expectedEffect.ply !== result.effect.ply ||
         expectedEffect.color !== result.effect.color ||
         expectedEffect.action !== result.effect.action ||
-        expectedEffect.square !== result.effect.square)
+        expectedEffect.square !== result.effect.square ||
+        expectedEffect.piece !== result.effect.piece)
     ) {
       throw new EngineError(
         "invalid-state",
@@ -187,17 +210,23 @@ function play(
     replay.chess = result.chess;
     replay.catEffects.push(result.effect);
     catTurn = { draw: draw ?? "", effect: result.effect };
+    if (capturedKing) replay.kingCapture = { winner: mover, reason: "king-captured" };
   }
-  if (replay.chess.inCheck()) replay.checks[mover] += 1;
+  if (!replay.kingCapture && replay.chess.inCheck()) replay.checks[mover] += 1;
   replay.records.push({
     ply: replay.records.length + 1,
     color: mover,
     ...toMoveInput(accepted),
-    san:
-      replay.state.rulesetId === "catchess"
-        ? accepted.san.replace(/[+#]$/, "") +
-          (replay.chess.isCheckmate() ? "#" : replay.chess.inCheck() ? "+" : "")
-        : accepted.san,
+    san: catMode
+      ? accepted.san.replace(/[+#]$/, "") +
+        (replay.kingCapture
+          ? ""
+          : replay.chess.isCheckmate()
+            ? "#"
+            : replay.chess.inCheck()
+              ? "+"
+              : "")
+      : accepted.san,
   });
   recordPosition(replay);
   return catTurn;
@@ -226,6 +255,7 @@ function restore(value: EngineState): Replay {
     records: [],
     catEffects: [],
     adapter: CHESS_RULES_ADAPTERS[parsed.data.rulesetId],
+    kingCapture: null,
   };
   recordPosition(replay);
   for (const [index, move] of parsed.data.moves.entries()) {
@@ -256,7 +286,9 @@ export function createEngineState(
     moves: [],
     ...(rulesetId === "catchess"
       ? { catchess: catchessConfig ?? { white: 25, black: 25 }, catTurns: [] }
-      : {}),
+      : rulesetId === "chaos-cat"
+        ? { catTurns: [] }
+        : {}),
   };
   if (rulesetId !== "catchess" && catchessConfig !== undefined) {
     throw new EngineError("invalid-state", "Cat settings apply only to Catchess.");
@@ -271,7 +303,22 @@ export function inspectEngine(state: EngineState): EnginePosition {
   return {
     fen: replay.chess.fen(),
     turn: color(replay.chess.turn()),
-    inCheck: replay.chess.inCheck(),
+    inCheck: !replay.kingCapture && replay.chess.inCheck(),
+    ...(replay.state.rulesetId === "chaos-cat"
+      ? {
+          threatenedKings: replay.kingCapture
+            ? []
+            : (["white", "black"] as const).filter((side) => {
+                const king = replay.chess.findPiece({
+                  type: "k",
+                  color: side === "white" ? "w" : "b",
+                })[0];
+                return (
+                  king !== undefined && replay.chess.isAttacked(king, side === "white" ? "b" : "w")
+                );
+              }),
+        }
+      : {}),
     board: board(replay.chess),
     legalMoves: result ? [] : replay.chess.moves({ verbose: true }).map(toMoveInput),
     moves: replay.records,
@@ -321,16 +368,21 @@ export function exportPgn(state: EngineState, result?: GameOutcome): string {
         ? "0-1"
         : "1/2-1/2"
     : "*";
-  replay.chess.setHeader("Event", "Chess Room game");
+  replay.chess.setHeader("Event", "Cat Chess game");
   replay.chess.setHeader("Result", score);
   if (replay.adapter.pgnVariant) replay.chess.setHeader("Variant", replay.adapter.pgnVariant);
-  if (replay.state.rulesetId === "catchess") {
+  if (replay.state.rulesetId === "catchess" || replay.state.rulesetId === "chaos-cat") {
     const headers = [
-      '[Event "Chess Room game"]',
+      '[Event "Cat Chess game"]',
       `[Result "${score}"]`,
-      '[Variant "Catchess"]',
-      `[CatchessWhiteChance "${replay.state.catchess?.white}"]`,
-      `[CatchessBlackChance "${replay.state.catchess?.black}"]`,
+      `[Variant "${replay.adapter.pgnVariant}"]`,
+      ...(finalOutcome?.reason === "king-captured" ? ['[Termination "king-captured"]'] : []),
+      ...(replay.state.rulesetId === "catchess"
+        ? [
+            `[CatchessWhiteChance "${replay.state.catchess?.white}"]`,
+            `[CatchessBlackChance "${replay.state.catchess?.black}"]`,
+          ]
+        : []),
     ];
     if (replay.state.initialFen !== STANDARD_INITIAL_FEN) {
       headers.push('[SetUp "1"]', `[FEN "${replay.state.initialFen}"]`);
@@ -345,7 +397,7 @@ export function exportPgn(state: EngineState, result?: GameOutcome): string {
       const effect = replay.catEffects[index];
       tokens.push(record.san);
       tokens.push(
-        `{Cat ${effect?.color} ${effect?.action}${effect?.square ? ` ${effect.square}` : ""}}`,
+        `{Cat ${effect?.color} ${effect?.action}${effect?.piece ? ` ${effect.piece}` : ""}${effect?.square ? ` ${effect.square}` : ""}}`,
       );
     }
     tokens.push(score);

@@ -92,4 +92,14 @@ export const CHESS_RULES_ADAPTERS: Readonly<Record<RulesetId, ChessRulesAdapter>
   standard,
   "three-check": threeCheck,
   catchess,
+  "chaos-cat": {
+    id: "chaos-cat",
+    version: 1,
+    pgnVariant: "Chaos Cat",
+    extraOutcome: () => null,
+    repetitionSuffix: () => "",
+    // Either cat may introduce winning material even when only kings remain.
+    isDeadPosition: () => false,
+    canWinOnTime: () => true,
+  },
 };
