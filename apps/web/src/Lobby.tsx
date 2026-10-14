@@ -1,5 +1,6 @@
 import {
   type CatchessSettings as CatSettings,
+  type CreateBotGame,
   type CreateGame,
   type OpenRoom,
   RULESETS,
@@ -7,6 +8,7 @@ import {
   TIME_CONTROLS,
 } from "@chess-room/contracts";
 import { useEffect, useState } from "react";
+import { BotSetup } from "./BotSetup";
 import { Cat } from "./Cat";
 import { CatchessSettings } from "./CatchessSettings";
 import { ChaosCatRules } from "./ChaosCatRules";
@@ -21,6 +23,9 @@ type LobbyProps = {
   canResume: boolean;
   onResume: () => Promise<void>;
   onCreate: (name: string, settings: CreateGame) => Promise<void>;
+  onCreateBot: (name: string, settings: CreateBotGame) => Promise<void>;
+  activeBotId: string | null;
+  onResumeBot: () => Promise<void>;
   onJoin: (name: string, invitation: string) => Promise<void>;
   openRooms: OpenRoom[];
   roomsLoading: boolean;
@@ -78,6 +83,9 @@ export function Lobby({
   canResume,
   onResume,
   onCreate,
+  onCreateBot,
+  activeBotId,
+  onResumeBot,
   onJoin,
   openRooms,
   roomsLoading,
@@ -93,7 +101,7 @@ export function Lobby({
   });
   const [catSettings, setCatSettings] = useState<CatSettings>({ host: 25, guest: 25 });
   const [invite, setInvite] = useState(initialInvitation);
-  const [tab, setTab] = useState<"create" | "join">(initialInvitation ? "join" : "create");
+  const [tab, setTab] = useState<"create" | "join" | "bot">(initialInvitation ? "join" : "create");
   const rules = RULESETS.find((entry) => entry.id === settings.rulesetId);
   const isOpen = settings.visibility === "open";
   const modeOrder: Record<string, number> = {
@@ -121,8 +129,8 @@ export function Lobby({
             <span className="hero-heading-accent">Curious cats.</span>
           </h1>
           <p className="introduction">
-            Bring a friend. Meet the cat. Play chess with a little luck, a little mischief, and a
-            board that never quite goes to plan.
+            Bring a friend or challenge the cat. Play chess with a little luck, a little mischief,
+            and a board that never quite goes to plan.
           </p>
           <div className="hero-details">
             <span>
@@ -210,228 +218,276 @@ export function Lobby({
             >
               Join a friend
             </button>
+            <button
+              type="button"
+              className={tab === "bot" ? "room-tab room-tab--active" : "room-tab"}
+              aria-pressed={tab === "bot"}
+              onClick={() => setTab("bot")}
+            >
+              Play the cat
+            </button>
           </fieldset>
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (tab === "create") {
-                const { visibility, ...config } = settings;
-                void onCreate(displayName.trim(), {
-                  ...config,
-                  ...(visibility === "open" ? { visibility } : {}),
-                  ...(settings.rulesetId === "catchess" ? { catchess: catSettings } : {}),
-                });
-              } else void onJoin(displayName.trim(), invite);
-            }}
-          >
-            <div className="form-field">
-              <label htmlFor="display-name">Your display name</label>
-              <input
-                id="display-name"
-                name="displayName"
-                placeholder="What should we call you?"
-                autoComplete="nickname"
-                maxLength={32}
-                required
-                value={displayName}
-                onChange={(event) => setDisplayName(event.target.value)}
-                disabled={busy}
-                aria-describedby="guest-name-hint"
+          {tab === "bot" ? (
+            <>
+              {activeBotId && (
+                <div className="resume-room">
+                  <span>Your unfinished cat game is saved.</span>
+                  <button
+                    type="button"
+                    className="button button--quiet button--small"
+                    disabled={busy}
+                    onClick={() => void onResumeBot()}
+                  >
+                    Return to your cat game
+                  </button>
+                </div>
+              )}
+              <div className="form-field">
+                <label htmlFor="bot-display-name">Your display name</label>
+                <input
+                  id="bot-display-name"
+                  form="bot-setup"
+                  maxLength={32}
+                  autoComplete="nickname"
+                  required
+                  value={displayName}
+                  disabled={busy}
+                  placeholder="What should we call you?"
+                  onChange={(event) => setDisplayName(event.target.value)}
+                />
+              </div>
+              <BotSetup
+                pending={busy}
+                onCreate={(config) => onCreateBot(displayName.trim(), config)}
               />
-              <span className="field-hint" id="guest-name-hint">
-                {session
-                  ? "Edit your name for your next room, or use your name in the header to change it now."
-                  : "Your guest seat stays in this browser. Keep its cookies to return."}
-              </span>
-            </div>
-            {tab === "create" ? (
-              <>
-                <fieldset className="visibility-field" aria-describedby="visibility-hint">
-                  <legend>Who can join?</legend>
-                  <div className="visibility-options">
-                    <label
-                      className={
-                        !isOpen
-                          ? "visibility-option visibility-option--selected"
-                          : "visibility-option"
-                      }
-                    >
-                      <input
-                        type="radio"
-                        name="visibility"
-                        checked={!isOpen}
-                        onChange={() => setSettings({ ...settings, visibility: "private" })}
-                        disabled={busy}
-                      />
-                      <span>Private invitation</span>
-                    </label>
-                    <label
-                      className={
-                        isOpen
-                          ? "visibility-option visibility-option--selected"
-                          : "visibility-option"
-                      }
-                    >
-                      <input
-                        type="radio"
-                        name="visibility"
-                        checked={isOpen}
-                        onChange={() => setSettings({ ...settings, visibility: "open" })}
-                        disabled={busy}
-                      />
-                      <span>Open lobby</span>
-                    </label>
-                  </div>
-                  <p className="field-hint" id="visibility-hint">
-                    {isOpen
-                      ? "Your display name and game settings will be listed publicly. Anyone visiting the site can take the open seat."
-                      : "Your room stays unlisted. Only someone with your invitation can take the other seat."}
-                  </p>
-                </fieldset>
-                <fieldset className="mode-field">
-                  <legend>Game mode</legend>
-                  <div className="mode-options">
-                    {modes.map((mode) => (
+            </>
+          ) : (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (tab === "create") {
+                  const { visibility, ...config } = settings;
+                  void onCreate(displayName.trim(), {
+                    ...config,
+                    ...(visibility === "open" ? { visibility } : {}),
+                    ...(settings.rulesetId === "catchess" ? { catchess: catSettings } : {}),
+                  });
+                } else void onJoin(displayName.trim(), invite);
+              }}
+            >
+              <div className="form-field">
+                <label htmlFor="display-name">Your display name</label>
+                <input
+                  id="display-name"
+                  name="displayName"
+                  placeholder="What should we call you?"
+                  autoComplete="nickname"
+                  maxLength={32}
+                  required
+                  value={displayName}
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  disabled={busy}
+                  aria-describedby="guest-name-hint"
+                />
+                <span className="field-hint" id="guest-name-hint">
+                  {session
+                    ? "Edit your name for your next room, or use your name in the header to change it now."
+                    : "Your guest seat stays in this browser. Keep its cookies to return."}
+                </span>
+              </div>
+              {tab === "create" ? (
+                <>
+                  <fieldset className="visibility-field" aria-describedby="visibility-hint">
+                    <legend>Who can join?</legend>
+                    <div className="visibility-options">
                       <label
                         className={
-                          settings.rulesetId === mode.id
-                            ? "mode-option mode-option--selected"
-                            : "mode-option"
+                          !isOpen
+                            ? "visibility-option visibility-option--selected"
+                            : "visibility-option"
                         }
-                        key={mode.id}
                       >
                         <input
                           type="radio"
-                          name="ruleset"
-                          value={mode.id}
-                          checked={settings.rulesetId === mode.id}
-                          onChange={() => setSettings({ ...settings, rulesetId: mode.id })}
+                          name="visibility"
+                          checked={!isOpen}
+                          onChange={() => setSettings({ ...settings, visibility: "private" })}
                           disabled={busy}
                         />
-                        <span className="mode-piece">
-                          {mode.id === "catchess" || mode.id === "chaos-cat" ? (
-                            <Cat chaos={mode.id === "chaos-cat"} evil={mode.id === "chaos-cat"} />
-                          ) : (
-                            <Piece type={mode.id === "standard" ? "k" : "n"} color="black" />
-                          )}
-                        </span>
-                        <span>
-                          <strong>
-                            {mode.label}
-                            {mode.id === "catchess" && (
-                              <span className="mode-badge" aria-hidden="true">
-                                THE ORIGINAL
-                              </span>
-                            )}
-                          </strong>
-                          <small>
-                            {mode.id === "chaos-cat"
-                              ? "Every move. A gift or a theft."
-                              : mode.id === "standard"
-                                ? "The game you know"
-                                : mode.id === "three-check"
-                                  ? "Three checks. A new challenge."
-                                  : "A little luck. A little mischief."}
-                          </small>
-                        </span>
+                        <span>Private invitation</span>
                       </label>
-                    ))}
-                  </div>
-                  <p className="field-hint">{rules?.description}</p>
-                </fieldset>
-                {settings.rulesetId === "catchess" && (
-                  <CatchessSettings value={catSettings} disabled={busy} onChange={setCatSettings} />
-                )}
-                {settings.rulesetId === "chaos-cat" && <ChaosCatRules />}
-                <div className="form-row">
-                  <div className="form-field">
-                    <label htmlFor="time-control">Time control</label>
-                    <select
-                      id="time-control"
-                      value={settings.timeControl}
-                      disabled={busy}
-                      onChange={(event) =>
-                        setSettings({
-                          ...settings,
-                          timeControl: event.target.value as CreateGame["timeControl"],
-                        })
-                      }
-                    >
-                      {Object.entries(TIME_CONTROLS).map(([value, control]) => (
-                        <option value={value} key={value}>
-                          {control.label}
-                        </option>
+                      <label
+                        className={
+                          isOpen
+                            ? "visibility-option visibility-option--selected"
+                            : "visibility-option"
+                        }
+                      >
+                        <input
+                          type="radio"
+                          name="visibility"
+                          checked={isOpen}
+                          onChange={() => setSettings({ ...settings, visibility: "open" })}
+                          disabled={busy}
+                        />
+                        <span>Open lobby</span>
+                      </label>
+                    </div>
+                    <p className="field-hint" id="visibility-hint">
+                      {isOpen
+                        ? "Your display name and game settings will be listed publicly. Anyone visiting the site can take the open seat."
+                        : "Your room stays unlisted. Only someone with your invitation can take the other seat."}
+                    </p>
+                  </fieldset>
+                  <fieldset className="mode-field">
+                    <legend>Game mode</legend>
+                    <div className="mode-options">
+                      {modes.map((mode) => (
+                        <label
+                          className={
+                            settings.rulesetId === mode.id
+                              ? "mode-option mode-option--selected"
+                              : "mode-option"
+                          }
+                          key={mode.id}
+                        >
+                          <input
+                            type="radio"
+                            name="ruleset"
+                            value={mode.id}
+                            checked={settings.rulesetId === mode.id}
+                            onChange={() => setSettings({ ...settings, rulesetId: mode.id })}
+                            disabled={busy}
+                          />
+                          <span className="mode-piece">
+                            {mode.id === "catchess" || mode.id === "chaos-cat" ? (
+                              <Cat chaos={mode.id === "chaos-cat"} evil={mode.id === "chaos-cat"} />
+                            ) : (
+                              <Piece type={mode.id === "standard" ? "k" : "n"} color="black" />
+                            )}
+                          </span>
+                          <span>
+                            <strong>
+                              {mode.label}
+                              {mode.id === "catchess" && (
+                                <span className="mode-badge" aria-hidden="true">
+                                  THE ORIGINAL
+                                </span>
+                              )}
+                            </strong>
+                            <small>
+                              {mode.id === "chaos-cat"
+                                ? "Every move. A gift or a theft."
+                                : mode.id === "standard"
+                                  ? "The game you know"
+                                  : mode.id === "three-check"
+                                    ? "Three checks. A new challenge."
+                                    : "A little luck. A little mischief."}
+                            </small>
+                          </span>
+                        </label>
                       ))}
-                    </select>
-                  </div>
-                  <div className="form-field">
-                    <label htmlFor="color">Your pieces</label>
-                    <select
-                      id="color"
-                      value={settings.color}
+                    </div>
+                    <p className="field-hint">{rules?.description}</p>
+                  </fieldset>
+                  {settings.rulesetId === "catchess" && (
+                    <CatchessSettings
+                      value={catSettings}
                       disabled={busy}
-                      onChange={(event) =>
-                        setSettings({
-                          ...settings,
-                          color: event.target.value as CreateGame["color"],
-                        })
-                      }
-                    >
-                      <option value="random">Random</option>
-                      <option value="white">White</option>
-                      <option value="black">Black</option>
-                    </select>
+                      onChange={setCatSettings}
+                    />
+                  )}
+                  {settings.rulesetId === "chaos-cat" && <ChaosCatRules />}
+                  <div className="form-row">
+                    <div className="form-field">
+                      <label htmlFor="time-control">Time control</label>
+                      <select
+                        id="time-control"
+                        value={settings.timeControl}
+                        disabled={busy}
+                        onChange={(event) =>
+                          setSettings({
+                            ...settings,
+                            timeControl: event.target.value as CreateGame["timeControl"],
+                          })
+                        }
+                      >
+                        {Object.entries(TIME_CONTROLS).map(([value, control]) => (
+                          <option value={value} key={value}>
+                            {control.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="form-field">
+                      <label htmlFor="color">Your pieces</label>
+                      <select
+                        id="color"
+                        value={settings.color}
+                        disabled={busy}
+                        onChange={(event) =>
+                          setSettings({
+                            ...settings,
+                            color: event.target.value as CreateGame["color"],
+                          })
+                        }
+                      >
+                        <option value="random">Random</option>
+                        <option value="white">White</option>
+                        <option value="black">Black</option>
+                      </select>
+                    </div>
                   </div>
-                </div>
-                <button
-                  type="submit"
-                  className="button button--primary button--wide"
-                  disabled={busy}
-                >
-                  {busy
-                    ? "Creating your room…"
-                    : isOpen
-                      ? "Create open room"
-                      : "Create private room"}
-                  <ArrowIcon />
-                </button>
-                <p className="form-note">
-                  {isOpen
-                    ? "The first player to join takes the seat. Your room appears on the home page."
-                    : "Only someone with your invitation can take the other seat."}
-                </p>
-              </>
-            ) : (
-              <>
-                <div className="form-field">
-                  <label htmlFor="invitation">Invitation link or code</label>
-                  <textarea
-                    id="invitation"
-                    name="invitation"
-                    rows={3}
-                    placeholder="Paste the invitation your friend shared"
-                    required
-                    value={invite}
-                    onChange={(event) => setInvite(event.target.value)}
+                  <button
+                    type="submit"
+                    className="button button--primary button--wide"
                     disabled={busy}
-                    spellCheck={false}
-                    autoComplete="off"
-                  />
-                  <span className="field-hint">
-                    Invitations are private, expire, and can claim one seat.
-                  </span>
-                </div>
-                <button
-                  type="submit"
-                  className="button button--primary button--wide"
-                  disabled={busy}
-                >
-                  {busy ? "Joining your friend…" : "Join private room"}
-                  <ArrowIcon />
-                </button>
-              </>
-            )}
-          </form>
+                  >
+                    {busy
+                      ? "Creating your room…"
+                      : isOpen
+                        ? "Create open room"
+                        : "Create private room"}
+                    <ArrowIcon />
+                  </button>
+                  <p className="form-note">
+                    {isOpen
+                      ? "The first player to join takes the seat. Your room appears on the home page."
+                      : "Only someone with your invitation can take the other seat."}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="form-field">
+                    <label htmlFor="invitation">Invitation link or code</label>
+                    <textarea
+                      id="invitation"
+                      name="invitation"
+                      rows={3}
+                      placeholder="Paste the invitation your friend shared"
+                      required
+                      value={invite}
+                      onChange={(event) => setInvite(event.target.value)}
+                      disabled={busy}
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                    <span className="field-hint">
+                      Invitations are private, expire, and can claim one seat.
+                    </span>
+                  </div>
+                  <button
+                    type="submit"
+                    className="button button--primary button--wide"
+                    disabled={busy}
+                  >
+                    {busy ? "Joining your friend…" : "Join private room"}
+                    <ArrowIcon />
+                  </button>
+                </>
+              )}
+            </form>
+          )}
         </div>
       </section>
     </main>

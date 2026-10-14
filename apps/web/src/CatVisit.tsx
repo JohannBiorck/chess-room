@@ -1,33 +1,29 @@
 import type { CatEffect, Color } from "@chess-room/contracts";
-import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type CSSProperties, useLayoutEffect, useRef, useState } from "react";
 
 import { Cat } from "./Cat";
 import { catEffectAnnouncement, catSquarePosition } from "./catPresentation";
 import { Piece } from "./Piece";
+import { usePageVisibility, useReducedMotion } from "./presentationPreferences";
 
-const VISIT_DURATION_MS = 2800;
+export const CAT_VISIT_MS = 1200;
+export const CAT_PAW_MS = 560;
 
-function useReducedMotion() {
-  const [reduced, setReduced] = useState(
-    () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  );
-  useEffect(() => {
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const change = () => setReduced(media.matches);
-    media.addEventListener("change", change);
-    return () => media.removeEventListener("change", change);
-  }, []);
-  return reduced;
-}
-
-export function useCatVisit(gameId: string, effects: CatEffect[]) {
+export function useCatVisit(
+  gameId: string,
+  effects: CatEffect[],
+  latestPly?: number,
+  layoutKey = "",
+) {
   const seen = useRef(new Set<number>());
   const queue = useRef<CatEffect[]>([]);
   const currentGame = useRef(gameId);
+  const currentLayout = useRef(layoutKey);
   const [active, setActive] = useState<CatEffect | null>(null);
   const [phase, setPhase] = useState<"arrive" | "paw" | "exit">("arrive");
   const [announcement, setAnnouncement] = useState("");
   const reduced = useReducedMotion();
+  const visible = usePageVisibility();
 
   useLayoutEffect(() => {
     if (currentGame.current !== gameId) {
@@ -40,7 +36,9 @@ export function useCatVisit(gameId: string, effects: CatEffect[]) {
     for (const effect of fresh) seen.current.add(effect.ply);
     const latest = fresh.at(-1);
     if (latest) setAnnouncement(catEffectAnnouncement(latest));
-    if (reduced) {
+    const layoutChanged = currentLayout.current !== layoutKey;
+    currentLayout.current = layoutKey;
+    if (reduced || !visible || effects.length === 0 || layoutChanged) {
       queue.current = [];
       setActive(null);
       return;
@@ -48,17 +46,23 @@ export function useCatVisit(gameId: string, effects: CatEffect[]) {
     // A short bounded queue prevents old effects from obscuring a rapidly advancing game.
     queue.current = [
       ...queue.current,
-      ...fresh.filter((effect) => effect.action !== "none" && effect.square !== undefined),
+      ...fresh.filter(
+        (effect) =>
+          effect.action !== "none" &&
+          effect.square !== undefined &&
+          (latestPly === undefined || effect.ply === latestPly),
+      ),
     ].slice(-3);
-    if (!active) setActive(queue.current.shift() ?? null);
-  }, [active, effects, gameId, reduced]);
+    if (!active || (latestPly !== undefined && active.ply !== latestPly))
+      setActive(queue.current.shift() ?? null);
+  }, [active, effects, gameId, latestPly, layoutKey, reduced, visible]);
 
   useLayoutEffect(() => {
     if (!active) return;
     setPhase("arrive");
-    const paw = window.setTimeout(() => setPhase("paw"), 1400);
-    const exit = window.setTimeout(() => setPhase("exit"), 1900);
-    const complete = window.setTimeout(() => setActive(null), VISIT_DURATION_MS);
+    const paw = window.setTimeout(() => setPhase("paw"), CAT_PAW_MS);
+    const exit = window.setTimeout(() => setPhase("exit"), 820);
+    const complete = window.setTimeout(() => setActive(null), CAT_VISIT_MS);
     return () => {
       window.clearTimeout(paw);
       window.clearTimeout(exit);
@@ -89,7 +93,7 @@ export function CatVisit({
     "--cat-start-y": `${(ownEdge ? 8 - point.row : -(point.row + 1)) * 100}%`,
     "--cat-start-x": point.column < 4 ? "-25%" : "25%",
     "--cat-facing": point.column < 4 ? 1 : -1,
-    "--cat-visit-duration": `${VISIT_DURATION_MS}ms`,
+    "--cat-visit-duration": `${CAT_VISIT_MS}ms`,
   } as CSSProperties;
   return (
     <div className="cat-layer" aria-hidden="true">

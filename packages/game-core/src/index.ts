@@ -1,3 +1,4 @@
+import type { BotSearchPosition } from "@chess-room/contracts";
 import {
   type BoardPiece,
   type CatchessConfig,
@@ -17,6 +18,7 @@ import {
 } from "@chess-room/contracts";
 import { Chess, type Square as ChessSquare, DEFAULT_POSITION, type Move } from "chess.js";
 import { z } from "zod";
+import { adjudicatePosition } from "./adjudication.js";
 import { applyCatEffect, derivedCatchessPosition } from "./catchess.js";
 import { applyChaosCatEffect } from "./chaos-cat.js";
 import { CHESS_RULES_ADAPTERS, type ChessRulesAdapter } from "./rules.js";
@@ -128,22 +130,15 @@ function board(chess: Chess): BoardPiece[] {
 }
 
 function outcome(replay: Replay): GameOutcome | null {
-  if (replay.kingCapture) return replay.kingCapture;
-  const turn = color(replay.chess.turn());
-  if (replay.chess.isCheckmate()) return { winner: oppositeColor(turn), reason: "checkmate" };
-  const extraOutcome = replay.adapter.extraOutcome(replay.checks);
-  if (extraOutcome) return extraOutcome;
-  if (replay.chess.isStalemate()) return { winner: null, reason: "stalemate" };
-  if (replay.adapter.isDeadPosition(board(replay.chess), replay.state.catchess))
-    return { winner: null, reason: "dead-position" };
-  if ((replay.repetitions.get(positionKey(replay)) ?? 0) >= 5) {
-    return { winner: null, reason: "fivefold-repetition" };
-  }
-  if (Number(replay.chess.fen().split(" ")[4]) >= 150) {
-    return { winner: null, reason: "seventy-five-move" };
-  }
-  if (replay.records.length >= MAX_GAME_PLIES) return { winner: null, reason: "move-limit" };
-  return null;
+  return adjudicatePosition({
+    chess: replay.chess,
+    rulesetId: replay.state.rulesetId,
+    catchess: replay.state.catchess,
+    checks: replay.checks,
+    repetitionCount: replay.repetitions.get(positionKey(replay)) ?? 0,
+    plies: replay.records.length,
+    kingCapture: replay.kingCapture,
+  });
 }
 
 function drawClaims(replay: Replay): DrawClaim[] {
@@ -232,7 +227,7 @@ function play(
   return catTurn;
 }
 
-function restore(value: EngineState): Replay {
+function restore(value: EngineState, onTurn?: (replay: Replay) => void): Replay {
   if (typeof value !== "object" || value === null) {
     throw new EngineError("invalid-state", "The saved position is invalid.");
   }
@@ -265,12 +260,46 @@ function restore(value: EngineState): Replay {
     try {
       const catTurn = parsed.data.catTurns?.[index];
       play(replay, move, catTurn?.draw, catTurn?.effect);
+      onTurn?.(replay);
     } catch (error) {
       if (error instanceof EngineError && error.code === "invalid-state") throw error;
       throw new EngineError("invalid-state", "The saved turn history is invalid.");
     }
   }
   return replay;
+}
+
+export function getEngineSearchPosition(state: EngineState): BotSearchPosition {
+  const replay = restore(state);
+  return {
+    fen: replay.chess.fen({ forceEnpassantSquare: true }),
+    rulesetId: replay.state.rulesetId,
+    rulesVersion: 1,
+    plies: replay.records.length,
+    checks: { ...replay.checks },
+    repetitions: [...replay.repetitions],
+    ...(replay.state.catchess ? { catchess: { ...replay.state.catchess } } : {}),
+  };
+}
+
+export const createBotSearchPosition = getEngineSearchPosition;
+
+export function inspectEngineReplay(state: EngineState): {
+  initialFen: string;
+  positions: { fen: string; move: MoveRecord; catEffect?: CatEffect }[];
+} {
+  const positions: { fen: string; move: MoveRecord; catEffect?: CatEffect }[] = [];
+  const replay = restore(state, (current) => {
+    const move = current.records.at(-1);
+    const catEffect = current.catEffects.at(-1);
+    if (!move) throw new EngineError("invalid-state", "The replay has no move.");
+    positions.push({
+      fen: current.chess.fen(),
+      move: { ...move },
+      ...(catEffect ? { catEffect: { ...catEffect } } : {}),
+    });
+  });
+  return { initialFen: replay.state.initialFen, positions };
 }
 
 export function createEngineState(

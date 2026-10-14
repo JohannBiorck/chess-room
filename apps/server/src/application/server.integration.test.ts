@@ -1118,11 +1118,12 @@ describe("HTTP and real Socket.IO game transport", () => {
       expect(retryResponse.statusCode).toBe(200);
       const retry = previousViewSchema.parse(retryResponse.json());
       expect(retry).toStrictEqual(accepted);
-      const receipts = await database.pool.query<{ acknowledgement: unknown }>(
-        "SELECT acknowledgement FROM command_receipts WHERE match_id=$1 AND command_id=$2",
-        [view.game.id, firstMove.commandId],
+      const participant = await application.service.session(whiteCookie.split("=")[1]);
+      if (!participant) throw new Error("The guest test identity was unavailable.");
+      const receipt = await database.transaction((tx) =>
+        tx.getReceipt(view.game.id, participant.id, firstMove.commandId),
       );
-      expect(receipts.rows[0]?.acknowledgement).toStrictEqual(accepted);
+      expect(receipt?.acknowledgement).toStrictEqual(accepted);
       const restoredResponse = await application.server.inject({
         method: "GET",
         url: `/api/games/${view.game.id}`,

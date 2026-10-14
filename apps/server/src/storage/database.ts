@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { brotliCompressSync, brotliDecompressSync, constants } from "node:zlib";
 import { OPEN_ROOM_LIFETIME_MS } from "@chess-room/contracts";
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
 
@@ -17,8 +18,8 @@ import type {
 export const waitingDeadlineSql = `LEAST(
   floor(extract(epoch FROM m.created_at)*1000)::bigint +
     CASE WHEN m.rules_config->>'visibility'='open' THEN ${OPEN_ROOM_LIFETIME_MS} ELSE 86400000 END,
-  (SELECT floor(extract(epoch FROM min(p.expires_at))*1000)::bigint
-   FROM match_seats host JOIN player_sessions p ON p.id=host.session_id
+  (SELECT floor(extract(epoch FROM min(CASE WHEN identity.account_id IS NOT NULL THEN '9999-01-01'::timestamptz ELSE p.expires_at END))*1000)::bigint
+   FROM match_seats host JOIN player_sessions p ON p.id=host.session_id JOIN players identity ON identity.id=p.id
    WHERE host.match_id=m.id))`;
 
 interface GameRow extends QueryResultRow {
@@ -216,10 +217,30 @@ export class Transaction {
 
   async getSession(tokenHash: string): Promise<SessionRecord | null> {
     const result = await this.client.query<SessionRow>(
-      "SELECT * FROM player_sessions WHERE token_hash = $1 AND expires_at > clock_timestamp()",
+      `SELECT p.* FROM player_sessions p JOIN players identity ON identity.id=p.id
+       WHERE p.token_hash=$1 AND p.expires_at>clock_timestamp() AND identity.account_id IS NULL AND identity.kind='human'`,
       [tokenHash],
     );
-    return result.rows[0] ? sessionRecord(result.rows[0]) : null;
+    if (result.rows[0]) return sessionRecord(result.rows[0]);
+    const account = await this.client.query<
+      SessionRow & { account_id: string; session_id: string; verified_at: Date }
+    >(
+      `SELECT p.id,s.token_hash,a.display_name,s.created_at,LEAST(s.expires_at,s.last_used_at+interval '7 days') AS expires_at,
+       a.id AS account_id,s.id AS session_id,s.verified_at FROM account_sessions s
+       JOIN accounts a ON a.id=s.account_id JOIN player_sessions p ON p.id=a.primary_player_id
+       WHERE s.token_hash=$1 AND NOT s.recovery_only AND s.expires_at>clock_timestamp()
+       AND s.last_used_at>clock_timestamp()-interval '7 days'`,
+      [tokenHash],
+    );
+    const row = account.rows[0];
+    return row
+      ? {
+          ...sessionRecord(row),
+          accountId: row.account_id,
+          accountSessionId: row.session_id,
+          verifiedAt: row.verified_at.getTime(),
+        }
+      : null;
   }
 
   async createSession(session: SessionRecord): Promise<void> {
@@ -234,6 +255,7 @@ export class Transaction {
         new Date(session.expiresAt),
       ],
     );
+    await this.client.query("INSERT INTO players(id) VALUES($1)", [session.id]);
   }
 
   async renewSession(sessionId: string, expiresAt: number): Promise<boolean> {
@@ -396,24 +418,45 @@ export class Transaction {
           sessionId: row.session_id,
           commandId: row.command_id,
           payloadHash: row.payload_hash,
-          acknowledgement: row.acknowledgement,
+          acknowledgement: (row as typeof row & { compressed_acknowledgement?: Buffer })
+            .compressed_acknowledgement
+            ? (JSON.parse(
+                brotliDecompressSync(
+                  (row as typeof row & { compressed_acknowledgement: Buffer })
+                    .compressed_acknowledgement,
+                  { maxOutputLength: 1_048_576 },
+                ).toString("utf8"),
+              ) as CommandReceipt["acknowledgement"])
+            : row.acknowledgement,
           createdAt: row.created_at.getTime(),
         }
       : null;
   }
 
   async storeReceipt(receipt: CommandReceipt): Promise<void> {
+    const compressed = brotliCompressSync(Buffer.from(JSON.stringify(receipt.acknowledgement)), {
+      params: { [constants.BROTLI_PARAM_QUALITY]: 4 },
+    });
+    const game = receipt.acknowledgement.game;
+    const terminal =
+      typeof game === "object" &&
+      game !== null &&
+      !Array.isArray(game) &&
+      game.phase === "finished";
+    if (compressed.length > (terminal ? 65_536 : 32_768))
+      throw new Error("Command receipt exceeds its storage budget.");
     await this.client.query(
       `INSERT INTO command_receipts
-       (match_id, session_id, command_id, payload_hash, acknowledgement, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       (match_id, session_id, command_id, payload_hash, acknowledgement, created_at,compressed_acknowledgement)
+       VALUES ($1, $2, $3, $4, $5, $6,$7)`,
       [
         receipt.gameId,
         receipt.sessionId,
         receipt.commandId,
         receipt.payloadHash,
-        receipt.acknowledgement,
+        {},
         new Date(receipt.createdAt),
+        compressed,
       ],
     );
   }

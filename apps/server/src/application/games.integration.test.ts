@@ -377,7 +377,7 @@ describe("durable game application", () => {
           .poll(
             async () => {
               const result = await database.pool.query<{ blocked: boolean }>(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT expires_at FROM player_sessions%') AS blocked",
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT p.expires_at%FROM player_sessions%') AS blocked",
               );
               return result.rows[0]?.blocked;
             },
@@ -765,7 +765,7 @@ describe("durable game application", () => {
         .poll(
           async () => {
             const result = await database.pool.query<{ blocked: boolean }>(
-              "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT expires_at FROM player_sessions%') AS blocked",
+              "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT p.expires_at%FROM player_sessions%') AS blocked",
             );
             return result.rows[0]?.blocked;
           },
@@ -1093,10 +1093,8 @@ describe("durable game application", () => {
         [view.game.id],
       );
       await database.pool.query(
-        `UPDATE command_receipts SET acknowledgement=jsonb_set(
-      jsonb_set(acknowledgement,'{game}',(acknowledgement->'game')-'catchess'),
-      '{game,position}',(acknowledgement->'game'->'position')-'catEffects') WHERE match_id=$1`,
-        [view.game.id],
+        `UPDATE command_receipts SET acknowledgement=$2,compressed_acknowledgement=NULL WHERE match_id=$1`,
+        [view.game.id, accepted],
       );
       const restored = await service.view(white, view.game.id);
       expect(restored.game).not.toHaveProperty("catchess");

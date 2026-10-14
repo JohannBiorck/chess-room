@@ -22,7 +22,7 @@ export function readApplicationConfig(environment: NodeJS.ProcessEnv): Applicati
   let origin: URL;
   try {
     origin = new URL(
-      environment.WEB_ORIGIN ?? environment.RENDER_EXTERNAL_URL ?? "http://127.0.0.1:5173",
+      environment.WEB_ORIGIN ?? environment.RENDER_EXTERNAL_URL ?? "http://localhost:5173",
     );
   } catch {
     throw new Error("WEB_ORIGIN must be an HTTP origin.");

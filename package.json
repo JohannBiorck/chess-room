@@ -28,7 +28,7 @@
     "db:check": "docker compose exec -T postgres psql -U chess_room -d chess_room -c \"SELECT version();\"",
     "build:packages": "npm run build --workspace @chess-room/contracts && npm run build --workspace @chess-room/game-core",
     "test:integration": "npm run build:packages && node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
-    "test:e2e": "npm run build && playwright test",
+    "test:e2e": "npm run build && node --env-file-if-exists=.env scripts/test-browser.mjs",
     "db:migrate": "npm run migrate --workspace @chess-room/server",
     "start": "npm run start --workspace @chess-room/server",
     "verify:full": "npm run verify && npm run test:integration && npm run test:e2e",

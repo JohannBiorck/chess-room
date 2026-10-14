@@ -13,7 +13,7 @@ describe("application configuration", () => {
   it("defaults to localhost with no trusted proxy", () => {
     expect(readApplicationConfig({ DATABASE_URL: databaseUrl })).toEqual({
       databaseUrl,
-      webOrigin: "http://127.0.0.1:5173",
+      webOrigin: "http://localhost:5173",
       secureCookies: false,
       serveWeb: false,
     });

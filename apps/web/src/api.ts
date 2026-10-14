@@ -11,20 +11,32 @@ export class ApiError extends Error {
 
 const STARTUP_REQUEST_TIMEOUT_MS = 75_000;
 const GAME_REQUEST_TIMEOUT_MS = 12_000;
-const startupPaths = new Set(["/api/session", "/api/games", "/api/invitations/join"]);
+const startupPaths = new Set([
+  "/api/session",
+  "/api/account",
+  "/api/bot-games",
+  "/api/games",
+  "/api/invitations/join",
+]);
 
-export async function request<T>(path: string, body?: unknown): Promise<T> {
+export async function request<T>(
+  path: string,
+  body?: unknown,
+  method?: "GET" | "POST" | "DELETE",
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(path, {
-      method: body === undefined ? "GET" : "POST",
+      method: method ?? (body === undefined ? "GET" : "POST"),
       credentials: "same-origin",
       cache: "no-store",
       headers: body === undefined ? {} : { "Content-Type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       // An idle service can take longer to start; active game requests retain a short deadline.
       signal: AbortSignal.timeout(
-        startupPaths.has(path) ? STARTUP_REQUEST_TIMEOUT_MS : GAME_REQUEST_TIMEOUT_MS,
+        startupPaths.has(path) && method !== "DELETE"
+          ? STARTUP_REQUEST_TIMEOUT_MS
+          : GAME_REQUEST_TIMEOUT_MS,
       ),
     });
   } catch {

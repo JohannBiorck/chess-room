@@ -5,6 +5,11 @@ Cat Chess, Chaos Cat, Standard chess and Three-check share one match service. Br
 public state and submit actions; the server owns moves, revisions, clocks,
 random cat decisions and results.
 
+Optional passkey accounts map rotating login credentials onto stable player
+identities. Legacy guest UUIDs and receipt ownership remain unchanged when a
+guest is explicitly claimed. Completed games have private, versioned archives
+independent of operational match retention.
+
 Rooms are private by default. Hosts can explicitly choose an open room for
 public discovery. Full game state remains available only to the two seated
 guests, including for open rooms.
@@ -48,7 +53,7 @@ shape remain unchanged so existing games and receipts recover correctly.
 
 ## Commands
 
-1. Validate the bounded command and authenticated guest cookie.
+1. Validate the bounded command and authenticated guest/account cookie.
 2. Lock the match and revalidate the session and player seat.
 3. Find an existing receipt before checking the expected revision.
 4. Adjudicate any expired clock, check revision and apply the action.
@@ -154,6 +159,59 @@ closure processing is catching up after server sleep.
 
 Finished games and closed rooms are removed after 30 days by hourly bounded cleanup.
 Histories are bounded at 1,200 plies.
+
+## Accounts and history
+
+`players` retains each original participant ID; seats and accepted receipts keep
+their existing identifiers. `account_sessions` stores only random-token hashes,
+with absolute/idle expiry, rotation and revocation. Account ownership can include
+explicitly imported guest identities. Names do not authorize access.
+
+SimpleWebAuthn verifies purpose-bound, expiring, single-use server challenges
+against the exact game origin and RP hostname. Passkey public keys, counters and
+backup semantics are stored in PostgreSQL. Recovery codes create a restricted
+session that must register a replacement passkey before accessing games/history.
+There is no email or external authentication-provider integration.
+
+Finishing a played account game archives its original rules/version, engine
+record, outcome and finishing names atomically. Account history associations
+authorize list/detail/export independently for each participant. Public replay
+DTOs contain recorded positions/effects, never server draws, internal identities
+or credentials. History is bounded at 500 games per account/up to 365 days;
+operational cleanup cannot erase a required archive. Deletion removes the user's
+associations and anonymizes results retained by opponents.
+
+Admission serializes within the application schema and measures table/index/TOAST
+sizes with conservative base overhead. Reservations cover remaining receipts,
+events and archive growth for all games. Compressed receipts reproduce exact
+accepted acknowledgements, including legacy JSON receipts. The application has
+an 800 MiB storage allocation and retains headroom within the existing Free
+database. A game is limited to 1,500 accepted operations as well as 1,200 plies.
+
+## Browser bot and presentation
+
+Bot games have an explicit bot participant with no usable bearer credential,
+a real human controller seat, frozen algorithm/profile and a durable per-turn
+ticket in match lifecycle state. Only the controller can submit that pending
+bot turn. Revision/ticket/payload-hash checks and receipts prevent duplicate
+commits or cat rerolls. The bot cannot join public rooms. Untimed bot games
+pause computation when their owning browser is hidden; search is never run by
+the web server.
+
+`packages/game-core/search` exposes Node-free compact positions and shared
+legality, mutation and adjudication primitives. The browser Worker uses bounded
+iterative search, capture continuations and weighted chance branches. It cannot
+choose the server's next draw. Every suggested root move is checked against the
+authoritative legal destinations. Strength is measured locally without a public
+Elo claim; browser-controlled opponents are casual, not rated authorities.
+
+Presentation events are derived at the confirmed-view boundary, with game/ply
+identities and explicit live/recovery handling. Immediate own-move previews are
+confirmed without a second slide. Native overlays cannot intercept board input.
+One bounded Web Audio service generates original cues only after activation;
+sound scheduling is independent of reduced motion. Visibility, identity changes,
+newer states and unmount cancel stale work. History replay stays read-only and
+silent by default.
 
 ## Security
 

@@ -25,6 +25,9 @@ export interface SessionRecord {
   displayName: string;
   expiresAt: number;
   createdAt: number;
+  accountId?: string;
+  accountSessionId?: string;
+  verifiedAt?: number;
 }
 
 export interface SeatRecord {

@@ -1,7 +1,13 @@
 import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
 import {
+  BOT_ALGORITHM,
+  type BotCommand,
+  type BotMetadata,
+  type BotPositionView,
+  botMetadataSchema,
   type CatchessConfig,
   type Color,
+  type CreateBotGame,
   type CreateGame,
   displayNameSchema,
   type GameCommand,
@@ -20,6 +26,7 @@ import {
   applyEngineMove,
   canWinOnTime,
   claimEngineDraw,
+  createBotSearchPosition,
   createEngineState,
   EngineError,
   engineStateSchema,
@@ -30,9 +37,12 @@ import {
 import { type Database, type Transaction, waitingDeadlineSql } from "../storage/database.js";
 import type { GameRecord, JsonObject, SessionRecord } from "../storage/records.js";
 import { ApplicationError } from "./errors.js";
+import { HistoryService } from "./history.js";
 
 export const SESSION_LIFETIME = 30 * 24 * 60 * 60 * 1000;
 const INVITATION_LIFETIME = 24 * 60 * 60 * 1000;
+// Finish active play with two command slots left for a friends rematch.
+const MAX_ACCEPTED_COMMANDS = 1500;
 export const tokenHash = (token: string) => createHash("sha256").update(token).digest("hex");
 const json = (value: unknown): JsonObject => JSON.parse(JSON.stringify(value)) as JsonObject;
 interface Lifecycle {
@@ -45,15 +55,26 @@ interface Lifecycle {
   rematchRequested: Color[];
   rematchGameId: string | null;
   closure?: NonNullable<PublicGame["closure"]>;
+  botRequestId?: string | null;
 }
 const lifecycle = (game: GameRecord) => game.lifecycle as unknown as Lifecycle;
+const bot = (game: GameRecord): BotMetadata | null =>
+  game.rulesConfig.bot
+    ? {
+        ...botMetadataSchema.parse(game.rulesConfig.bot),
+        requestId: lifecycle(game).botRequestId ?? null,
+      }
+    : null;
 
 export class GameService {
+  readonly history: HistoryService;
   constructor(
     readonly database: Database,
     private readonly testNow?: () => number,
     private readonly serverDraw: () => string = () => randomBytes(32).toString("hex"),
-  ) {}
+  ) {
+    this.history = new HistoryService(database, undefined, testNow);
+  }
 
   private now(tx: Transaction) {
     return this.testNow ? Promise.resolve(this.testNow()) : tx.databaseNow();
@@ -89,6 +110,20 @@ export class GameService {
   async rename(actor: SessionRecord, displayName: string): Promise<SessionRecord> {
     displayName = displayNameSchema.parse(displayName);
     return this.database.transaction(async (tx) => {
+      if (actor.accountId) {
+        const active = await tx.getSession(actor.tokenHash);
+        if (!active || active.accountId !== actor.accountId)
+          throw new ApplicationError("SESSION_REQUIRED", "Your account session expired.", 401);
+        await tx.client.query("UPDATE accounts SET display_name=$2 WHERE id=$1", [
+          actor.accountId,
+          displayName,
+        ]);
+        await tx.client.query(
+          "UPDATE player_sessions SET display_name=$2 WHERE id IN(SELECT id FROM players WHERE account_id=$1)",
+          [actor.accountId, displayName],
+        );
+        return { ...active, displayName };
+      }
       const session = await tx.renameSession(actor.id, actor.tokenHash, displayName);
       if (!session)
         throw new ApplicationError("SESSION_REQUIRED", "Your guest session has expired.", 401);
@@ -110,7 +145,8 @@ export class GameService {
        JOIN match_seats s ON s.match_id=m.id
        JOIN player_sessions p ON p.id=s.session_id
        WHERE m.id=ANY($1::uuid[]) AND ($2::uuid IS NULL OR EXISTS (
-         SELECT 1 FROM match_seats member WHERE member.match_id=m.id AND member.session_id=$2))`,
+         SELECT 1 FROM match_seats member JOIN players member_identity ON member_identity.id=member.session_id
+         WHERE member.match_id=m.id AND (member.session_id=$2 OR member_identity.account_id=(SELECT account_id FROM players WHERE id=$2))))`,
       [gameIds, participantId ?? null],
     );
     const games = new Map<
@@ -142,12 +178,13 @@ export class GameService {
         expires_at: Date;
       }>(
         `SELECT m.id,m.ruleset_id,m.lifecycle,m.engine_state,s.color,p.display_name,
-                m.created_at,p.expires_at FROM matches m
+                m.created_at,CASE WHEN identity.account_id IS NOT NULL THEN clock_timestamp()+interval '100 years' ELSE p.expires_at END AS expires_at FROM matches m
          JOIN match_seats s ON s.match_id=m.id
          JOIN player_sessions p ON p.id=s.session_id
+         JOIN players identity ON identity.id=p.id
          WHERE m.status='waiting' AND m.rules_config->>'visibility'='open'
            AND m.created_at>to_timestamp(($1::bigint-$3::bigint)/1000.0)
-           AND p.expires_at>to_timestamp($1::bigint/1000.0)
+           AND (identity.account_id IS NOT NULL OR p.expires_at>to_timestamp($1::bigint/1000.0))
            AND NOT EXISTS (SELECT 1 FROM match_seats other
              WHERE other.match_id=m.id AND other.color<>s.color)
          ORDER BY m.created_at DESC,m.id LIMIT $2`,
@@ -173,20 +210,37 @@ export class GameService {
   private async requireSeat(tx: Transaction, gameId: string, actor: SessionRecord): Promise<Color> {
     if (!(await tx.getSession(actor.tokenHash)))
       throw new ApplicationError("SESSION_REQUIRED", "Your guest session has expired.", 401);
-    const seat = (await tx.listSeats(gameId)).find((item) => item.sessionId === actor.id);
+    const seat = await this.ownedSeat(tx, gameId, actor);
     if (!seat)
       throw new ApplicationError("FORBIDDEN", "Only the two players can access this game.", 403);
     return seat.color;
   }
 
+  private async ownedSeat(tx: Transaction, id: string, actor: SessionRecord) {
+    const result = await tx.client.query<{ color: Color; session_id: string }>(
+      `SELECT s.color,s.session_id FROM match_seats s JOIN players p ON p.id=s.session_id
+      WHERE s.match_id=$1 AND (s.session_id=$2 OR ($3::uuid IS NOT NULL AND p.account_id=$3)) ORDER BY s.color`,
+      [id, actor.id, actor.accountId ?? null],
+    );
+    return result.rows[0]
+      ? { color: result.rows[0].color, sessionId: result.rows[0].session_id }
+      : null;
+  }
+
   private async requireCapacity(tx: Transaction, sessionId: string) {
-    const participant = await tx.client.query<{ expires_at: Date }>(
-      "SELECT expires_at FROM player_sessions WHERE id=$1 FOR UPDATE",
+    const participant = await tx.client.query<{
+      expires_at: Date;
+      account_id: string | null;
+      kind: string;
+    }>(
+      "SELECT p.expires_at,i.account_id,i.kind FROM player_sessions p JOIN players i ON i.id=p.id WHERE p.id=$1 FOR UPDATE OF p",
       [sessionId],
     );
     if (
       !participant.rows[0] ||
-      participant.rows[0].expires_at.getTime() <= (await tx.databaseNow())
+      (participant.rows[0].kind !== "bot" &&
+        !participant.rows[0].account_id &&
+        participant.rows[0].expires_at.getTime() <= (await tx.databaseNow()))
     )
       throw new ApplicationError(
         "SESSION_REQUIRED",
@@ -195,9 +249,10 @@ export class GameService {
       );
     const result = await tx.client.query<{ count: string }>(
       `SELECT count(*) FROM matches m JOIN match_seats s ON s.match_id=m.id
-       WHERE s.session_id=$1 AND (m.status='active' OR
+       JOIN players owner ON owner.id=s.session_id
+       WHERE (s.session_id=$1 OR ($3::uuid IS NOT NULL AND owner.account_id=$3)) AND (m.status='active' OR
          (m.status='waiting' AND ${waitingDeadlineSql}>$2))`,
-      [sessionId, await this.now(tx)],
+      [sessionId, await this.now(tx), participant.rows[0]?.account_id ?? null],
     );
     if (Number(result.rows[0]?.count) >= 10)
       throw new ApplicationError(
@@ -231,6 +286,7 @@ export class GameService {
       timeControl: life.timeControl,
       ...(game.rulesConfig.visibility === "open" ? { visibility: "open" as const } : {}),
       ...(state.rulesetId === "catchess" ? { catchess: state.catchess } : {}),
+      ...(bot(game) ? { bot: bot(game) as BotMetadata } : {}),
       players,
       position,
       clocks: life.remaining
@@ -287,10 +343,18 @@ export class GameService {
     actor?: Color,
   ) {
     const previous = game.revision;
+    const position = inspectEngine(engineStateSchema.parse(game.engineState));
+    const opponent = bot(game);
+    if (opponent) {
+      lifecycle(game).botRequestId =
+        game.status === "active" && position.turn === opponent.color
+          ? (opponent.requestId ?? randomUUID())
+          : null;
+    }
     game.revision += 1;
     game.updatedAt = now;
     await tx.saveGame(game, previous);
-    const position = inspectEngine(engineStateSchema.parse(game.engineState));
+    await this.history.archive(tx, game);
     await tx.appendEvent({
       gameId: game.id,
       revision: game.revision,
@@ -334,8 +398,8 @@ export class GameService {
 
   private async waitingDeadline(tx: Transaction, game: GameRecord): Promise<number> {
     const owner = await tx.client.query<{ expires_at: Date | null }>(
-      `SELECT min(p.expires_at) AS expires_at FROM match_seats s
-       JOIN player_sessions p ON p.id=s.session_id WHERE s.match_id=$1`,
+      `SELECT min(CASE WHEN i.account_id IS NOT NULL THEN clock_timestamp()+interval '100 years' ELSE p.expires_at END) AS expires_at FROM match_seats s
+       JOIN player_sessions p ON p.id=s.session_id JOIN players i ON i.id=p.id WHERE s.match_id=$1`,
       [game.id],
     );
     return Math.min(
@@ -409,6 +473,7 @@ export class GameService {
           : undefined,
       );
       await tx.createGame(game);
+      await this.history.reserve(tx, game.id);
       await tx.addSeat({ gameId: game.id, color, sessionId: actor.id });
       await tx.appendEvent({
         gameId: game.id,
@@ -422,10 +487,208 @@ export class GameService {
     });
   }
 
+  async createBot(actor: SessionRecord, input: CreateBotGame): Promise<GameView> {
+    return this.database.transaction(async (tx) => {
+      if (!(await tx.getSession(actor.tokenHash)))
+        throw new ApplicationError("SESSION_REQUIRED", "Sign in or create a guest session.", 401);
+      await this.requireCapacity(tx, actor.id);
+      await this.requireBotCapacity(tx, actor.id);
+      const now = await this.now(tx);
+      const color: Color =
+        input.color === "random" ? (randomInt(2) ? "white" : "black") : input.color;
+      const chances = input.catchess ?? { host: 25, guest: 25 };
+      const game = this.fresh(
+        {
+          rulesetId: input.rulesetId,
+          color,
+          timeControl: "untimed",
+          ...(input.rulesetId === "catchess" ? { catchess: chances } : {}),
+        },
+        now,
+        input.rulesetId === "catchess"
+          ? color === "white"
+            ? { white: chances.host, black: chances.guest }
+            : { white: chances.guest, black: chances.host }
+          : undefined,
+      );
+      const opponent: BotMetadata = {
+        color: oppositeColor(color),
+        profile: input.profile,
+        algorithm: BOT_ALGORITHM,
+        requestId: color === "black" ? randomUUID() : null,
+      };
+      game.rulesConfig.bot = json({ ...opponent, requestId: null });
+      lifecycle(game).botRequestId = opponent.requestId;
+      this.start(game, now);
+      // Bot identities have no usable authentication token and can only be
+      // controlled through the real owner's dedicated, fenced turn route.
+      const participant: SessionRecord = {
+        id: randomUUID(),
+        tokenHash: tokenHash(randomBytes(32).toString("hex")),
+        displayName: "Cat Bot",
+        createdAt: now,
+        expiresAt: now + SESSION_LIFETIME,
+      };
+      await tx.createSession(participant);
+      await tx.client.query("UPDATE players SET kind='bot' WHERE id=$1", [participant.id]);
+      await tx.createGame(game);
+      await this.history.reserve(tx, game.id);
+      await tx.addSeat({ gameId: game.id, color, sessionId: actor.id });
+      await tx.addSeat({ gameId: game.id, color: opponent.color, sessionId: participant.id });
+      await tx.appendEvent({
+        gameId: game.id,
+        revision: 0,
+        type: "bot-created",
+        payload: { phase: "active" },
+        createdAt: now,
+      });
+      return { game: await this.project(tx, game, now), seat: color };
+    });
+  }
+
+  private async requireBotCapacity(tx: Transaction, playerId: string) {
+    const existing = await tx.client.query(
+      `SELECT m.id FROM matches m JOIN match_seats s ON s.match_id=m.id
+      JOIN players p ON p.id=s.session_id WHERE m.status='active' AND m.rules_config ? 'bot'
+      AND (s.session_id=$1 OR p.account_id=(SELECT account_id FROM players WHERE id=$1)) LIMIT 1`,
+      [playerId],
+    );
+    if (existing.rows.length)
+      throw new ApplicationError(
+        "BOT_GAME_LIMIT",
+        "Resume or finish your existing cat game first.",
+        429,
+      );
+  }
+
+  async activeBot(actor: SessionRecord): Promise<string | null> {
+    return this.database.transaction(async (tx) => {
+      if (!(await tx.getSession(actor.tokenHash)))
+        throw new ApplicationError("SESSION_REQUIRED", "Your session has expired.", 401);
+      const result = await tx.client.query<{ id: string }>(
+        `SELECT m.id FROM matches m
+        JOIN match_seats s ON s.match_id=m.id JOIN players p ON p.id=s.session_id
+        WHERE m.status='active' AND m.rules_config ? 'bot' AND p.kind='human'
+        AND (s.session_id=$1 OR ($2::uuid IS NOT NULL AND p.account_id=$2))
+        ORDER BY m.updated_at DESC,m.id LIMIT 1`,
+        [actor.id, actor.accountId ?? null],
+      );
+      return result.rows[0]?.id ?? null;
+    });
+  }
+
+  private async requireBot(tx: Transaction, game: GameRecord, actor: SessionRecord) {
+    const seat = await this.requireSeat(tx, game.id, actor);
+    const opponent = bot(game);
+    if (
+      !opponent ||
+      seat === opponent.color ||
+      game.status !== "active" ||
+      inspectEngine(engineStateSchema.parse(game.engineState)).turn !== opponent.color ||
+      !opponent.requestId
+    )
+      throw new ApplicationError(
+        "BOT_NOT_READY",
+        "There is no pending cat turn in this game.",
+        409,
+      );
+    return { seat, opponent };
+  }
+
+  async botPosition(actor: SessionRecord, id: string): Promise<BotPositionView> {
+    return this.database.transaction(async (tx) => {
+      const game = await tx.lockGame(id);
+      if (!game) throw new ApplicationError("NOT_FOUND", "Game not found.", 404);
+      const { opponent } = await this.requireBot(tx, game, actor);
+      return {
+        gameId: id,
+        revision: game.revision,
+        requestId: opponent.requestId as string,
+        profile: opponent.profile,
+        algorithm: opponent.algorithm,
+        position: createBotSearchPosition(engineStateSchema.parse(game.engineState)),
+      };
+    });
+  }
+
+  async botCommand(actor: SessionRecord, id: string, command: BotCommand): Promise<GameView> {
+    const payloadHash = tokenHash(JSON.stringify(command));
+    return this.database.transaction(async (tx) => {
+      const game = await tx.lockGame(id);
+      if (!game) throw new ApplicationError("NOT_FOUND", "Game not found.", 404);
+      const seat = await this.requireSeat(tx, id, actor);
+      const opponent = bot(game);
+      if (!opponent || seat === opponent.color)
+        throw new ApplicationError(
+          "BOT_NOT_READY",
+          "This game has no controlled cat opponent.",
+          409,
+        );
+      const participant = (await tx.listSeats(id)).find((entry) => entry.color === opponent.color);
+      if (!participant)
+        throw new ApplicationError("BOT_NOT_READY", "The cat seat is unavailable.", 409);
+      const previous = await tx.getReceipt(id, participant.sessionId, command.commandId);
+      if (previous) {
+        if (previous.payloadHash !== payloadHash)
+          throw new ApplicationError(
+            "COMMAND_REUSED",
+            "A command identifier cannot be reused for another move.",
+            409,
+          );
+        return gameViewSchema.parse(previous.acknowledgement);
+      }
+      await this.requireBot(tx, game, actor);
+      if (command.expectedRevision !== game.revision)
+        throw new ApplicationError(
+          "STALE_REVISION",
+          "The game changed. Refresh and try again.",
+          409,
+        );
+      if (command.commandId !== opponent.requestId)
+        throw new ApplicationError(
+          "BOT_TICKET_CHANGED",
+          "This cat turn has a different command identifier.",
+          409,
+        );
+      const now = await this.now(tx);
+      const action: GameCommand["action"] = { type: "move", ...command.move };
+      try {
+        const count = await tx.client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM command_receipts WHERE match_id=$1",
+          [id],
+        );
+        const accepted = Number(count.rows[0]?.count ?? 0);
+        this.requireCommandCapacity(accepted);
+        await this.act(tx, game, opponent.color, { ...command, action }, now);
+        if (accepted >= MAX_ACCEPTED_COMMANDS - 3 && game.status === "active")
+          this.finish(game, { winner: null, reason: "move-limit" }, now);
+      } catch (error) {
+        if (error instanceof EngineError)
+          throw new ApplicationError(
+            error.code.toUpperCase().replaceAll("-", "_"),
+            error.message,
+            409,
+          );
+        throw error;
+      }
+      await this.persist(tx, game, "bot-move", now, action, opponent.color);
+      const view = { game: await this.project(tx, game, now), seat };
+      await tx.storeReceipt({
+        gameId: id,
+        sessionId: participant.sessionId,
+        commandId: command.commandId,
+        payloadHash,
+        acknowledgement: json(view),
+        createdAt: now,
+      });
+      return view;
+    });
+  }
+
   private async issue(tx: Transaction, game: GameRecord, color: Color, now: number) {
     const token = randomBytes(32).toString("base64url");
     const owner = await tx.client.query<{ expires_at: Date }>(
-      "SELECT p.expires_at FROM match_seats s JOIN player_sessions p ON p.id=s.session_id WHERE s.match_id=$1 AND s.color=$2",
+      "SELECT CASE WHEN i.account_id IS NOT NULL THEN clock_timestamp()+interval '100 years' ELSE p.expires_at END AS expires_at FROM match_seats s JOIN player_sessions p ON p.id=s.session_id JOIN players i ON i.id=p.id WHERE s.match_id=$1 AND s.color=$2",
       [game.id, oppositeColor(color)],
     );
     const expiresAt = Math.min(
@@ -510,7 +773,8 @@ export class GameService {
         );
       // Returning the error out of the transaction commits any recovered closure.
       const expired = await this.expire(tx, game, now);
-      if (invitation.consumedBy === actor.id)
+      const returning = await this.ownedSeat(tx, game.id, actor);
+      if (invitation.consumedBy && returning?.sessionId === invitation.consumedBy)
         return { view: { game: await this.project(tx, game, now), seat: invitation.color } };
       if (expired) return { error: unavailable() };
       if (
@@ -519,7 +783,7 @@ export class GameService {
         invitation.expiresAt <= now
       )
         throw unavailable();
-      if ((await tx.listSeats(game.id)).some((seat) => seat.sessionId === actor.id))
+      if (returning)
         throw new ApplicationError(
           "OWN_INVITATION",
           "Open this invitation in your friend's browser.",
@@ -552,7 +816,7 @@ export class GameService {
       if (!(await tx.getSession(actor.tokenHash)))
         throw new ApplicationError("SESSION_REQUIRED", "Your guest session has expired.", 401);
       const seats = await tx.listSeats(id);
-      const existing = seats.find((seat) => seat.sessionId === actor.id);
+      const existing = await this.ownedSeat(tx, id, actor);
       let now = await this.now(tx);
       const expired = await this.expire(tx, game, now);
       // A lost join acknowledgement remains recoverable once this room has started.
@@ -617,7 +881,10 @@ export class GameService {
       const game = await tx.lockGame(id);
       if (!game) throw new ApplicationError("NOT_FOUND", "Game not found.", 404);
       const seat = await this.requireSeat(tx, id, actor);
-      const previous = await tx.getReceipt(id, actor.id, command.commandId);
+      const identity = await this.ownedSeat(tx, id, actor);
+      if (!identity)
+        throw new ApplicationError("FORBIDDEN", "Only the players can access this game.", 403);
+      const previous = await tx.getReceipt(id, identity.sessionId, command.commandId);
       if (previous) {
         if (previous.payloadHash !== payloadHash)
           throw new ApplicationError(
@@ -641,7 +908,15 @@ export class GameService {
           409,
         );
       try {
+        const count = await tx.client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM command_receipts WHERE match_id=$1",
+          [id],
+        );
+        const accepted = Number(count.rows[0]?.count ?? 0);
+        this.requireCommandCapacity(accepted);
         await this.act(tx, game, seat, command, now);
+        if (accepted >= MAX_ACCEPTED_COMMANDS - 3 && game.status === "active")
+          this.finish(game, { winner: null, reason: "move-limit" }, now);
       } catch (error) {
         if (error instanceof EngineError)
           throw new ApplicationError(
@@ -655,7 +930,7 @@ export class GameService {
       const view = { game: await this.project(tx, game, now), seat };
       await tx.storeReceipt({
         gameId: id,
-        sessionId: actor.id,
+        sessionId: identity.sessionId,
         commandId: command.commandId,
         payloadHash,
         acknowledgement: json(view),
@@ -665,6 +940,15 @@ export class GameService {
     });
     if (result.error) throw result.error;
     return result.view;
+  }
+
+  private requireCommandCapacity(accepted: number) {
+    if (accepted >= MAX_ACCEPTED_COMMANDS)
+      throw new ApplicationError(
+        "COMMAND_LIMIT",
+        "This game has reached its command limit. Its result and accepted retries remain available.",
+        409,
+      );
   }
 
   private async act(
@@ -695,9 +979,9 @@ export class GameService {
         if (life.rematchRequested.includes(seat))
           throw new ApplicationError("ALREADY_REQUESTED", "You already requested a rematch.", 409);
         life.rematchRequested.push(seat);
-        return;
+        if (!bot(game)) return;
       }
-      if (!life.rematchRequested.includes(oppositeColor(seat)))
+      if (action.type === "accept-rematch" && !life.rematchRequested.includes(oppositeColor(seat)))
         throw new ApplicationError("NO_REMATCH", "Your opponent has not requested a rematch.", 409);
       const next = this.fresh(
         {
@@ -712,9 +996,23 @@ export class GameService {
         state.catchess ? { white: state.catchess.black, black: state.catchess.white } : undefined,
       );
       const oldSeats = await tx.listSeats(game.id);
+      const oldBot = bot(game);
+      if (oldBot) {
+        const owner = oldSeats.find((entry) => entry.color !== oldBot.color);
+        if (!owner)
+          throw new ApplicationError("REMATCH_UNAVAILABLE", "The human seat is unavailable.", 409);
+        await this.requireBotCapacity(tx, owner.sessionId);
+        next.rulesConfig.bot = json({
+          ...oldBot,
+          color: oppositeColor(oldBot.color),
+          requestId: null,
+        });
+        lifecycle(next).botRequestId = oldBot.color === "black" ? randomUUID() : null;
+      }
       for (const old of [...oldSeats].sort((a, b) => a.sessionId.localeCompare(b.sessionId)))
         await this.requireCapacity(tx, old.sessionId);
       await tx.createGame(next);
+      await this.history.reserve(tx, next.id);
       for (const old of oldSeats)
         await tx.addSeat({
           gameId: next.id,
@@ -744,6 +1042,15 @@ export class GameService {
       case "move": {
         if (position.turn !== seat)
           throw new ApplicationError("NOT_YOUR_TURN", "Wait for your opponent's move.", 409);
+        if (
+          !position.legalMoves.some(
+            (move) =>
+              move.from === action.from &&
+              move.to === action.to &&
+              move.promotion === action.promotion,
+          )
+        )
+          throw new EngineError("illegal-move", "That move is not legal.");
         const next = applyEngineMove(
           state,
           {
@@ -772,6 +1079,12 @@ export class GameService {
         this.finish(game, { winner: oppositeColor(seat), reason: "resignation" }, now);
         return;
       case "offer-draw":
+        if (bot(game))
+          throw new ApplicationError(
+            "BOT_DRAW_UNAVAILABLE",
+            "The cat plays on. You can claim an eligible draw.",
+            409,
+          );
         if (life.drawOffer)
           throw new ApplicationError("DRAW_PENDING", "A draw offer is already pending.", 409);
         life.drawOffer = seat;
@@ -836,7 +1149,8 @@ export class GameService {
     await this.database.transaction(async (tx) => {
       const abandoned = await tx.client.query<{ id: string }>(`SELECT m.id FROM matches m
         WHERE m.status='active' AND NOT EXISTS (SELECT 1 FROM match_seats s
-          JOIN player_sessions p ON p.id=s.session_id WHERE s.match_id=m.id AND p.expires_at>clock_timestamp())
+          JOIN player_sessions p ON p.id=s.session_id JOIN players identity ON identity.id=p.id WHERE s.match_id=m.id AND identity.kind='human'
+          AND ((identity.account_id IS NULL AND p.expires_at>clock_timestamp()) OR (identity.account_id IS NOT NULL AND m.updated_at>clock_timestamp()-interval '30 days')))
         LIMIT 100 FOR UPDATE OF m SKIP LOCKED`);
       for (const row of abandoned.rows) {
         const game = await tx.getGame(row.id);
@@ -848,9 +1162,12 @@ export class GameService {
       }
       await tx.client.query(`DELETE FROM matches WHERE id IN (
         SELECT id FROM matches WHERE status='finished' AND updated_at<clock_timestamp()-interval '30 days'
+        AND (lifecycle->'outcome' IS NULL OR lifecycle->'outcome'='null'::jsonb OR NOT EXISTS(SELECT 1 FROM match_seats s JOIN players p ON p.id=s.session_id WHERE s.match_id=matches.id AND p.account_id IS NOT NULL)
+          OR EXISTS(SELECT 1 FROM match_archives a WHERE a.match_id=matches.id))
         LIMIT 100 FOR UPDATE SKIP LOCKED)`);
       await tx.client.query(`DELETE FROM player_sessions WHERE id IN (
         SELECT id FROM player_sessions p WHERE expires_at<clock_timestamp()
+        AND NOT EXISTS(SELECT 1 FROM players i WHERE i.id=p.id AND i.account_id IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM match_seats s WHERE s.session_id=p.id)
         AND NOT EXISTS (SELECT 1 FROM invitations i WHERE i.consumed_by=p.id)
         AND NOT EXISTS (SELECT 1 FROM command_receipts r WHERE r.session_id=p.id)
@@ -858,6 +1175,23 @@ export class GameService {
       await tx.client.query(
         "DELETE FROM app_rate_limits WHERE key IN (SELECT key FROM app_rate_limits WHERE window_start<floor(extract(epoch FROM clock_timestamp()-interval '24 hours')*1000)::bigint LIMIT 1000)",
       );
+      await this.history.cleanup(tx);
     });
+  }
+
+  async deleteAccountGames(tx: Transaction, accountId: string) {
+    const matches = await tx.client.query<{ id: string; color: Color }>(
+      `SELECT m.id,s.color FROM matches m JOIN match_seats s ON s.match_id=m.id
+      JOIN players p ON p.id=s.session_id WHERE p.account_id=$1 AND m.status IN ('waiting','active') ORDER BY m.id FOR UPDATE OF m`,
+      [accountId],
+    );
+    for (const row of matches.rows) {
+      const game = await tx.getGame(row.id);
+      if (!game) continue;
+      const now = await this.now(tx);
+      if (game.status === "waiting") await this.close(tx, game, "host-closed", now);
+      else this.finish(game, { winner: oppositeColor(row.color), reason: "resignation" }, now);
+      await this.persist(tx, game, "account-deleted", now);
+    }
   }
 }

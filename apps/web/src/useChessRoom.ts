@@ -1,5 +1,6 @@
 import {
   type CatEffect,
+  type CreateBotGame,
   type CreateGame,
   displayNameSchema,
   type GameAction,
@@ -24,11 +25,12 @@ import {
   currentGameId,
   errorMessage,
   invitationToken,
+  request as rawRequest,
   rememberGame,
-  request,
 } from "./api";
 import { liveCatEffects as collectLiveCatEffects } from "./catPresentation";
 import { type PendingMove, previewMove } from "./movePreview";
+import { type PresentationEvent, presentationUpdate } from "./presentationEvents";
 
 export type Invitation = { token: string; expiresAt: number };
 type SessionResponse = { session: SessionView | null };
@@ -36,6 +38,7 @@ type CreatedGame = GameView & { invitation: Invitation };
 type PendingCommand = { gameId: string; command: GameCommand };
 type Connection = "connecting" | "connected" | "reconnecting";
 type Delivery = { isCurrent: () => boolean; isLive: () => boolean };
+class IdentityChanged extends Error {}
 
 function parseGame(payload: unknown): GameView {
   const candidate =
@@ -52,11 +55,15 @@ export function useChessRoom() {
   const [session, setSession] = useState<SessionView | null>(null);
   const [view, setView] = useState<GameView | null>(null);
   const [liveCatEffects, setLiveCatEffects] = useState<CatEffect[]>([]);
+  const [presentationEvents, setPresentationEvents] = useState<PresentationEvent[]>([]);
   const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
   const viewRef = useRef<GameView | null>(null);
   const playersEpoch = useRef(0);
   const connectionEpoch = useRef(0);
   const subscribed = useRef(false);
+  const identityEpoch = useRef(0);
+  const navigationEpoch = useRef(0);
+  const [identityGeneration, setIdentityGeneration] = useState(0);
   const [invitation, setInvitation] = useState<Invitation | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -67,6 +74,7 @@ export function useChessRoom() {
   const [retry, setRetry] = useState<PendingCommand | null>(null);
   const [receivedAt, setReceivedAt] = useState(performance.now());
   const [openRooms, setOpenRooms] = useState<OpenRoom[]>([]);
+  const [activeBotId, setActiveBotId] = useState<string | null>(null);
   const [roomsLoading, setRoomsLoading] = useState(false);
   const [roomsError, setRoomsError] = useState<string | null>(null);
   const roomsRequest = useRef(0);
@@ -74,10 +82,26 @@ export function useChessRoom() {
     () => new URLSearchParams(window.location.hash.slice(1)).get("invite") ?? "",
   );
 
+  const request = useCallback(async <T>(path: string, body?: unknown): Promise<T> => {
+    const epoch = identityEpoch.current;
+    try {
+      const result = await rawRequest<T>(path, body);
+      if (epoch !== identityEpoch.current) throw new IdentityChanged();
+      return result;
+    } catch (cause) {
+      if (epoch !== identityEpoch.current) throw new IdentityChanged();
+      throw cause;
+    }
+  }, []);
+
   const applyView = useCallback((next: GameView, animate = false, preserveNames = false) => {
     const previous = viewRef.current;
     if (previous?.game.id === next.game.id && previous.game.revision > next.game.revision) return;
-    if (previous?.game.id !== next.game.id) playersEpoch.current += 1;
+    if (previous?.game.id !== next.game.id) {
+      playersEpoch.current += 1;
+      connectionEpoch.current += 1;
+      subscribed.current = false;
+    }
     if (preserveNames && previous?.game.id === next.game.id)
       next = {
         ...next,
@@ -95,8 +119,21 @@ export function useChessRoom() {
       next.game.position.catEffects ?? [],
       animate,
     );
+    const presentation = presentationUpdate(
+      previous?.game ?? null,
+      next.game,
+      animate,
+      document.visibilityState === "visible",
+      performance.now(),
+    );
+    if (presentation.reset) {
+      setPresentationEvents([]);
+      setLiveCatEffects([]);
+    } else if (presentation.events.length > 0) {
+      setPresentationEvents((events) => [...events, ...presentation.events].slice(-8));
+    }
     if (previous?.game.id !== next.game.id) setLiveCatEffects([]);
-    else if (arrivals.length > 0)
+    else if (!presentation.reset && arrivals.length > 0)
       setLiveCatEffects((effects) => [...effects, ...arrivals].slice(-24));
     viewRef.current = next;
     if (next.game.closure) setInvitation(null);
@@ -122,16 +159,21 @@ export function useChessRoom() {
         applyView(next, delivery?.isLive() ?? false, namesAtRequest !== playersEpoch.current);
       return next;
     },
-    [applyView],
+    [applyView, request],
   );
 
   const refreshOpenRooms = useCallback(async () => {
     const requestId = ++roomsRequest.current;
     setRoomsLoading(true);
     try {
-      const result = openRoomsSchema.parse(await request<unknown>("/api/lobbies"));
+      const [payload, bot] = await Promise.all([
+        request<unknown>("/api/lobbies"),
+        request<{ gameId: string | null }>("/api/bot-game"),
+      ]);
+      const result = openRoomsSchema.parse(payload);
       if (requestId !== roomsRequest.current || viewRef.current) return;
       setOpenRooms(result.rooms);
+      setActiveBotId(bot.gameId && /^[0-9a-f-]{36}$/i.test(bot.gameId) ? bot.gameId : null);
       setRoomsError(null);
     } catch (cause) {
       if (requestId === roomsRequest.current && !viewRef.current)
@@ -139,7 +181,7 @@ export function useChessRoom() {
     } finally {
       if (requestId === roomsRequest.current) setRoomsLoading(false);
     }
-  }, []);
+  }, [request]);
 
   const inLobby = view === null && !loading;
   useEffect(() => {
@@ -159,22 +201,27 @@ export function useChessRoom() {
 
   useEffect(() => {
     let alive = true;
+    const epoch = identityEpoch.current;
+    const navigation = navigationEpoch.current;
     async function initialize() {
       try {
         const payload = await request<SessionResponse>("/api/session");
         const existing = payload.session ? sessionViewSchema.parse(payload.session) : null;
-        if (!alive) return;
+        if (!alive || epoch !== identityEpoch.current || navigation !== navigationEpoch.current)
+          return;
         setSession(existing);
         const stored = currentGameId();
         if (existing && stored && !initialInvitation) {
           try {
             const saved = parseGame(await request<GameView>(`/api/games/${stored}`));
-            if (alive) applyView(saved);
+            if (alive && epoch === identityEpoch.current && navigation === navigationEpoch.current)
+              applyView(saved);
           } catch (cause) {
-            if (!alive) return;
+            if (!alive || epoch !== identityEpoch.current || navigation !== navigationEpoch.current)
+              return;
             setNotice(
               cause instanceof ApiError && [403, 404, 410].includes(cause.status)
-                ? "Your previous room is no longer available to this guest session. You can start a new game."
+                ? "Your previous room is unavailable to this player session. Sign in with its account or start a new game."
                 : "Your previous room could not be loaded. Try reconnecting before starting a new game.",
             );
             if (cause instanceof ApiError && [403, 404, 410].includes(cause.status))
@@ -182,25 +229,26 @@ export function useChessRoom() {
           }
         } else if (!existing && stored && !initialInvitation) {
           setNotice(
-            "Your guest session has expired or its cookie was removed. Existing seats cannot be recovered by display name. Start a new game with your friend.",
+            "Your player session has ended. Sign in to recover account games. Guest seats need their original valid browser cookie.",
           );
           rememberGame(null);
         }
       } catch (cause) {
-        if (alive) setError(errorMessage(cause));
+        if (alive && epoch === identityEpoch.current && navigation === navigationEpoch.current)
+          setError(errorMessage(cause));
       } finally {
-        if (alive) setLoading(false);
+        if (alive && epoch === identityEpoch.current) setLoading(false);
       }
     }
     void initialize();
     return () => {
       alive = false;
     };
-  }, [applyView, initialInvitation]);
+  }, [applyView, initialInvitation, request]);
 
   const gameId = view?.game.id;
   useEffect(() => {
-    if (!gameId) return;
+    if (!gameId || identityGeneration !== identityEpoch.current) return;
     let alive = true;
     subscribed.current = false;
     connectionEpoch.current += 1;
@@ -295,7 +343,7 @@ export function useChessRoom() {
             setSession(null);
             rememberGame(null);
             setNotice(
-              "Your guest session ended. Return to the lobby to start a new game. A display name cannot recover an expired seat.",
+              "Your player session ended. Sign in again for account games, or return to the lobby for guest play.",
             );
           }
         });
@@ -315,7 +363,7 @@ export function useChessRoom() {
       document.removeEventListener("visibilitychange", foreground);
       socket.disconnect();
     };
-  }, [applyView, gameId, refreshGame]);
+  }, [applyView, gameId, refreshGame, identityGeneration]);
 
   async function operation(work: () => Promise<void>) {
     if (busyRef.current) return false;
@@ -323,10 +371,12 @@ export function useChessRoom() {
     setBusy(true);
     setError(null);
     setNotice(null);
+    const epoch = identityEpoch.current;
     try {
       await work();
       return true;
     } catch (cause) {
+      if (cause instanceof IdentityChanged || epoch !== identityEpoch.current) return false;
       setError(errorMessage(cause));
       if (cause instanceof ApiError && cause.status === 401) {
         setSession(null);
@@ -334,8 +384,10 @@ export function useChessRoom() {
       }
       return false;
     } finally {
-      busyRef.current = false;
-      setBusy(false);
+      if (epoch === identityEpoch.current) {
+        busyRef.current = false;
+        setBusy(false);
+      }
     }
   }
 
@@ -384,10 +436,12 @@ export function useChessRoom() {
 
   async function joinOpen(displayName: string, roomId: string) {
     await operation(async () => {
+      const navigation = ++navigationEpoch.current;
       if (!/^[0-9a-f-]{36}$/i.test(roomId)) throw new Error("Choose an available open room.");
       await ensureSession(displayName);
       try {
         const payload = await request<GameView>(`/api/lobbies/${roomId}/join`, {});
+        if (navigation !== navigationEpoch.current) throw new IdentityChanged();
         setInvitation(null);
         setRetry(null);
         applyView(parseGame(payload));
@@ -401,8 +455,10 @@ export function useChessRoom() {
 
   async function create(displayName: string, settings: CreateGame) {
     await operation(async () => {
+      const navigation = ++navigationEpoch.current;
       await ensureSession(displayName);
       const payload = await request<CreatedGame>("/api/games", settings);
+      if (navigation !== navigationEpoch.current) throw new IdentityChanged();
       const token = invitationTokenSchema.parse(payload.invitation.token);
       setInvitation({ token, expiresAt: payload.invitation.expiresAt });
       setRetry(null);
@@ -410,13 +466,27 @@ export function useChessRoom() {
     });
   }
 
+  async function createBot(displayName: string, settings: CreateBotGame) {
+    await operation(async () => {
+      const navigation = ++navigationEpoch.current;
+      await ensureSession(displayName);
+      const payload = await request<GameView>("/api/bot-games", settings);
+      if (navigation !== navigationEpoch.current) throw new IdentityChanged();
+      setInvitation(null);
+      setRetry(null);
+      applyView(parseGame(payload));
+    });
+  }
+
   async function join(displayName: string, value: string) {
     await operation(async () => {
+      const navigation = ++navigationEpoch.current;
       const parsed = invitationTokenSchema.safeParse(invitationToken(value));
       if (!parsed.success)
         throw new Error("Paste a complete invitation link or its invitation code.");
       await ensureSession(displayName);
       const payload = await request<GameView>("/api/invitations/join", { token: parsed.data });
+      if (navigation !== navigationEpoch.current) throw new IdentityChanged();
       setInvitation(null);
       setRetry(null);
       applyView(parseGame(payload));
@@ -428,6 +498,7 @@ export function useChessRoom() {
     setRetry(null);
     const current = viewRef.current;
     const epoch = connectionEpoch.current;
+    const navigation = navigationEpoch.current;
     const live = subscribed.current;
     if (
       pending.command.action.type === "move" &&
@@ -446,6 +517,8 @@ export function useChessRoom() {
         setPendingMove({
           gameId: pending.gameId,
           revision: current.game.revision,
+          commandId: pending.command.commandId,
+          ply: current.game.position.moves.length + 1,
           move: pending.command.action,
           board,
         });
@@ -455,9 +528,12 @@ export function useChessRoom() {
         `/api/games/${pending.gameId}/commands`,
         pending.command,
       );
+      if (navigation !== navigationEpoch.current) throw new IdentityChanged();
       applyView(parseGame(payload), true, true);
       setPendingMove(null);
     } catch (cause) {
+      if (cause instanceof IdentityChanged || navigation !== navigationEpoch.current)
+        throw new IdentityChanged();
       // Roll back only the visual preview; an independently confirmed socket update
       // remains authoritative even when its HTTP acknowledgement was lost.
       setPendingMove(null);
@@ -502,7 +578,11 @@ export function useChessRoom() {
     const id = viewRef.current?.game.id ?? currentGameId();
     if (id)
       await operation(async () => {
-        await refreshGame(id, true);
+        const navigation = ++navigationEpoch.current;
+        await refreshGame(id, true, {
+          isCurrent: () => navigation === navigationEpoch.current,
+          isLive: () => false,
+        });
       });
     else window.location.reload();
   }
@@ -523,22 +603,105 @@ export function useChessRoom() {
     const id = viewRef.current?.game.rematchGameId;
     if (!id) return;
     await operation(async () => {
-      await refreshGame(id, true);
+      const navigation = ++navigationEpoch.current;
+      await refreshGame(id, true, {
+        isCurrent: () => navigation === navigationEpoch.current,
+        isLive: () => false,
+      });
+      if (navigation !== navigationEpoch.current) throw new IdentityChanged();
       setInvitation(null);
       setRetry(null);
     });
   }
 
-  function lobby() {
-    if (viewRef.current?.game.closure) rememberGame(null);
+  async function openGame(id: string) {
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return;
+    await operation(async () => {
+      const navigation = ++navigationEpoch.current;
+      await refreshGame(id, true, {
+        isCurrent: () => navigation === navigationEpoch.current,
+        isLive: () => false,
+      });
+      if (navigation !== navigationEpoch.current) throw new IdentityChanged();
+      setInvitation(null);
+      setRetry(null);
+    });
+  }
+
+  async function identityChanged() {
+    const previousGame = viewRef.current?.game.id ?? currentGameId();
+    const navigation = navigationEpoch.current;
+    const epoch = ++identityEpoch.current;
+    connectionEpoch.current += 1;
+    playersEpoch.current += 1;
+    subscribed.current = false;
+    roomsRequest.current += 1;
+    setIdentityGeneration((value) => value + 1);
     viewRef.current = null;
     setView(null);
+    setSession(null);
+    setActiveBotId(null);
     setPendingMove(null);
+    setPresentationEvents([]);
     setLiveCatEffects([]);
     setInvitation(null);
     setRetry(null);
     setError(null);
     setNotice(null);
+    busyRef.current = false;
+    setBusy(false);
+    setLoading(true);
+    try {
+      const payload = await request<SessionResponse>("/api/session");
+      if (navigation !== navigationEpoch.current) return;
+      const next = payload.session ? sessionViewSchema.parse(payload.session) : null;
+      setSession(next);
+      if (next && previousGame) {
+        try {
+          await refreshGame(previousGame, true, {
+            isCurrent: () =>
+              epoch === identityEpoch.current && navigation === navigationEpoch.current,
+            isLive: () => false,
+          });
+        } catch (cause) {
+          if (cause instanceof IdentityChanged || navigation !== navigationEpoch.current) return;
+          if (cause instanceof ApiError && [401, 403, 404, 410].includes(cause.status))
+            rememberGame(null);
+          else setNotice("Your saved room could not be loaded. You can retry from the lobby.");
+        }
+      } else rememberGame(null);
+    } catch (cause) {
+      if (!(cause instanceof IdentityChanged) && navigation === navigationEpoch.current)
+        setError(errorMessage(cause));
+    } finally {
+      if (epoch === identityEpoch.current) setLoading(false);
+    }
+  }
+
+  const confirmBotView = useCallback(
+    (next: GameView) => {
+      if (viewRef.current?.game.id !== next.game.id) return;
+      applyView(parseGame(next), true, true);
+    },
+    [applyView],
+  );
+
+  function lobby() {
+    navigationEpoch.current += 1;
+    connectionEpoch.current += 1;
+    playersEpoch.current += 1;
+    subscribed.current = false;
+    if (viewRef.current?.game.closure) rememberGame(null);
+    viewRef.current = null;
+    setView(null);
+    setPendingMove(null);
+    setLiveCatEffects([]);
+    setPresentationEvents([]);
+    setInvitation(null);
+    setRetry(null);
+    setError(null);
+    setNotice(null);
+    setLoading(false);
     // The last room remains resumable until another room is created or joined.
   }
 
@@ -546,6 +709,7 @@ export function useChessRoom() {
     session,
     view,
     liveCatEffects,
+    presentationEvents,
     pendingMove,
     invitation,
     loading,
@@ -557,10 +721,12 @@ export function useChessRoom() {
     receivedAt,
     initialInvitation,
     openRooms,
+    activeBotId,
     roomsLoading,
     roomsError,
     hasSavedGame: session !== null && currentGameId() !== null,
     create,
+    createBot,
     join,
     joinOpen,
     rename,
@@ -570,6 +736,9 @@ export function useChessRoom() {
     reconnect,
     renewInvitation,
     openRematch,
+    openGame,
+    identityChanged,
+    confirmBotView,
     lobby,
     clearError: () => setError(null),
   };

@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { botMetadataSchema } from "./bot.js";
+
+export * from "./accounts.js";
+export * from "./bot.js";
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_GAME_PLIES = 1200;
@@ -232,6 +236,7 @@ export const publicGameSchema = z
     timeControl: timeControlSchema,
     visibility: z.literal("open").optional(),
     closure: roomClosureSchema.optional(),
+    bot: botMetadataSchema.optional(),
     catchess: catchessConfigSchema.nullable().optional(),
     players: publicPlayersSchema,
     position: publicEnginePositionSchema,
@@ -245,6 +250,17 @@ export const publicGameSchema = z
   })
   .strict()
   .superRefine((game, context) => {
+    if (
+      game.bot &&
+      (game.timeControl !== "untimed" ||
+        game.visibility ||
+        game.phase === "waiting" ||
+        game.closure)
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Bot games are private, untimed and already started.",
+      });
     if (
       game.closure &&
       (game.phase !== "finished" ||

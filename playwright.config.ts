@@ -11,7 +11,7 @@ export default defineConfig({
   reporter: "list",
   outputDir: "work/browser-results",
   use: {
-    baseURL: "http://127.0.0.1:5174",
+    baseURL: "http://localhost:5174",
     trace: "off",
     screenshot: "only-on-failure",
     video: "off",
@@ -31,10 +31,10 @@ export default defineConfig({
     env: {
       HOST: "127.0.0.1",
       PORT: "5174",
-      WEB_ORIGIN: "http://127.0.0.1:5174",
+      WEB_ORIGIN: "http://localhost:5174",
       SERVE_WEB: "true",
     },
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 60_000,
     stdout: "pipe",
     stderr: "pipe",

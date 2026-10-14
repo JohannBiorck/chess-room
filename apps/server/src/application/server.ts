@@ -1,5 +1,8 @@
 import { fileURLToPath } from "node:url";
 import {
+  botCommandSchema,
+  botPositionViewSchema,
+  createBotGameSchema,
   createGameSchema,
   gameCommandSchema,
   guestSessionSchema,
@@ -16,6 +19,8 @@ import { z } from "zod";
 import { buildServer } from "../server.js";
 import { type Database, waitingDeadlineSql } from "../storage/database.js";
 import type { SessionRecord } from "../storage/records.js";
+import { registerAccountRoutes } from "./account-routes.js";
+import { AccountService } from "./accounts.js";
 import { BackgroundScheduler } from "./background.js";
 import type { ApplicationConfig } from "./config.js";
 import { ApplicationError, errorBody } from "./errors.js";
@@ -44,6 +49,8 @@ export async function buildApplication(options: {
   let scheduler: BackgroundScheduler | undefined;
   const requestStarts = new WeakMap<FastifyRequest, number>();
   const cookieName = config.secureCookies ? "__Host-chess_session" : "chess_session";
+  const accountCookie = config.secureCookies ? "__Host-cat_account" : "cat_account";
+  const accounts = new AccountService(database, config.webOrigin);
   await server.register(cookie);
   server.addHook("onRequest", async (request, reply) => {
     requestStarts.set(request, performance.now());
@@ -76,6 +83,8 @@ export async function buildApplication(options: {
       request.method === "POST" &&
       [
         "/api/games",
+        "/api/bot-games",
+        "/api/games/:id/bot-command",
         "/api/invitations/join",
         "/api/lobbies/:id/join",
         "/api/games/:id/commands",
@@ -113,8 +122,11 @@ export async function buildApplication(options: {
     reply.code(404).send({ error: { code: "NOT_FOUND", message: "Resource not found." } }),
   );
 
+  const optionalActor = async (request: FastifyRequest) =>
+    (await accounts.actor(request.cookies[accountCookie])) ??
+    (await service.session(request.cookies[cookieName]));
   const actor = async (request: FastifyRequest): Promise<SessionRecord> => {
-    const session = await service.session(request.cookies[cookieName]);
+    const session = await optionalActor(request);
     if (!session)
       throw new ApplicationError(
         "SESSION_REQUIRED",
@@ -129,13 +141,13 @@ export async function buildApplication(options: {
     return reply.code(ready ? 200 : 503).send({ status: ready ? "ready" : "unavailable" });
   });
   server.get("/api/session", async (request) => {
-    const session = await service.session(request.cookies[cookieName]);
+    const session = await optionalActor(request);
     return { session: session ? service.sessionView(session) : null };
   });
   server.post("/api/session", { bodyLimit: 16_384 }, async (request, reply) => {
     const input = guestSessionSchema.parse(request.body);
     await rateLimit(database, `session:${request.ip}`, 20);
-    const existing = await service.session(request.cookies[cookieName]);
+    const existing = await optionalActor(request);
     if (existing) return { session: service.sessionView(existing) };
     const created = await service.createSession(input.displayName);
     reply.setCookie(cookieName, created.token, {
@@ -146,6 +158,19 @@ export async function buildApplication(options: {
       maxAge: SESSION_LIFETIME / 1000,
     });
     return { session: service.sessionView(created.session) };
+  });
+  registerAccountRoutes(server, {
+    accounts,
+    games: service,
+    config,
+    actor: optionalActor,
+    guest: (request) => service.session(request.cookies[cookieName]),
+    accountCookie,
+    guestCookie: cookieName,
+    onIdentityChange: async () => {
+      await disconnectRevoked();
+      scheduler?.wake();
+    },
   });
   server.post("/api/session/name", { bodyLimit: 16_384 }, async (request) => {
     const session = await actor(request);
@@ -188,6 +213,31 @@ export async function buildApplication(options: {
   server.get("/api/games/:id", async (request) =>
     service.view(await actor(request), gameId(request)),
   );
+  server.post("/api/bot-games", { bodyLimit: 16_384 }, async (request, reply) => {
+    const session = await actor(request);
+    await rateLimit(database, `create:${session.id}`, 10);
+    return reply
+      .code(201)
+      .send(await service.createBot(session, createBotGameSchema.parse(request.body)));
+  });
+  server.get("/api/bot-game", async (request) => {
+    const session = await optionalActor(request);
+    return { gameId: session ? await service.activeBot(session) : null };
+  });
+  server.get("/api/games/:id/bot-position", async (request) =>
+    botPositionViewSchema.parse(await service.botPosition(await actor(request), gameId(request))),
+  );
+  server.post("/api/games/:id/bot-command", { bodyLimit: 16_384 }, async (request) => {
+    const session = await actor(request);
+    await rateLimit(database, `command:${session.id}`, 120);
+    const view = await service.botCommand(
+      session,
+      gameId(request),
+      botCommandSchema.parse(request.body),
+    );
+    publish(view.game);
+    return view;
+  });
   server.post("/api/games/:id/invitation", { bodyLimit: 16_384 }, async (request) => {
     const session = await actor(request);
     await rateLimit(database, `invite:${session.id}`, 20);
@@ -237,7 +287,9 @@ export async function buildApplication(options: {
   io.use(async (socket, next) => {
     try {
       const parsed = server.parseCookie(socket.request.headers.cookie ?? "");
-      const session = await service.session(parsed[cookieName]);
+      const session =
+        (await accounts.actor(parsed[accountCookie])) ??
+        (await service.session(parsed[cookieName]));
       if (!session) return next(new Error("SESSION_REQUIRED"));
       await rateLimit(database, `socket:${session.id}`, 30);
       if ((connections.get(session.id) ?? 0) >= 8) return next(new Error("CONNECTION_LIMIT"));
@@ -292,9 +344,10 @@ export async function buildApplication(options: {
       try {
         await rateLimit(database, `subscribe:${session.id}`, 60);
         const id = subscriptionSchema.parse(payload).gameId;
-        const refreshed = await service.session(
-          server.parseCookie(socket.request.headers.cookie ?? "")[cookieName],
-        );
+        const cookies = server.parseCookie(socket.request.headers.cookie ?? "");
+        const refreshed =
+          (await accounts.actor(cookies[accountCookie])) ??
+          (await service.session(cookies[cookieName]));
         if (!refreshed)
           throw new ApplicationError("SESSION_REQUIRED", "Your guest session expired.", 401);
         const profileGeneration = profileGenerations.get(id) ?? 0;
@@ -332,13 +385,33 @@ export async function buildApplication(options: {
   });
 
   let working: Promise<void> | null = null;
+  let authSweepAt = 0;
+  const disconnectRevoked = async () => {
+    const sockets = [...io.sockets.sockets.values()];
+    if (!sockets.length) return;
+    const hashes = sockets.map((socket) => (socket.data.session as SessionRecord).tokenHash);
+    const valid = await database.pool.query<{ token_hash: string }>(
+      `SELECT p.token_hash FROM player_sessions p JOIN players identity ON identity.id=p.id
+      WHERE p.token_hash=ANY($1::text[]) AND p.expires_at>clock_timestamp() AND identity.account_id IS NULL AND identity.kind='human'
+      UNION SELECT token_hash FROM account_sessions WHERE token_hash=ANY($1::text[]) AND NOT recovery_only AND expires_at>clock_timestamp() AND last_used_at>clock_timestamp()-interval '7 days'`,
+      [hashes],
+    );
+    const allowed = new Set(valid.rows.map((row) => row.token_hash));
+    for (const socket of sockets)
+      if (!allowed.has((socket.data.session as SessionRecord).tokenHash)) socket.disconnect(true);
+  };
   let cleanupAt = 0;
   const performTick = (): Promise<void> => {
     if (working) return working;
     working = (async () => {
       await service.expireDue();
+      if (Date.now() > authSweepAt) {
+        await disconnectRevoked();
+        authSweepAt = Date.now() + 1000;
+      }
       if (Date.now() >= cleanupAt) {
         await service.cleanup();
+        await accounts.cleanup();
         cleanupAt = Date.now() + 3_600_000;
       }
       // Durable outbox acknowledges committed events. Each instance also checks its

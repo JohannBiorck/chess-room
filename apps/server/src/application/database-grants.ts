@@ -10,6 +10,15 @@ const applicationTables = [
   "command_receipts",
   "event_outbox",
   "app_rate_limits",
+  "accounts",
+  "players",
+  "account_sessions",
+  "account_credentials",
+  "authentication_challenges",
+  "account_recovery_codes",
+  "match_archives",
+  "account_match_history",
+  "storage_reservations",
 ] as const;
 
 function validateIdentifier(value: string): string {

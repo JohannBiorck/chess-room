@@ -9,9 +9,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@chess-room/contracts": "0.1.0",
+    "@chess-room/game-core": "0.1.0",
+    "@simplewebauthn/browser": "14.0.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "@chess-room/contracts": "0.1.0",
     "socket.io-client": "4.8.4"
   },
   "devDependencies": {

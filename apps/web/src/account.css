@@ -1,0 +1,202 @@
+.account-panel {
+  display: grid;
+  gap: 1rem;
+  max-height: 75vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.2rem;
+  min-width: 0;
+}
+.account-panel p {
+  margin: 0.2rem 0;
+  line-height: 1.5;
+}
+.account-panel form,
+.account-panel section {
+  display: grid;
+  gap: 0.7rem;
+}
+.account-panel label {
+  display: grid;
+  gap: 0.3rem;
+}
+.account-panel input,
+.account-panel select {
+  width: 100%;
+  min-width: 0;
+  padding: 0.6rem;
+  border: 1px solid var(--border, #d5d0c4);
+  border-radius: 0.5rem;
+  background: var(--surface, #fff);
+  color: inherit;
+}
+.account-panel button {
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--border, #d5d0c4);
+  border-radius: 0.6rem;
+  background: var(--surface, #fff);
+  color: inherit;
+  cursor: pointer;
+}
+.account-panel button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.account-panel button:focus-visible,
+.account-panel a:focus-visible {
+  outline: 3px solid var(--green, #297b62);
+  outline-offset: 2px;
+}
+.account-hint {
+  font-size: 0.9rem;
+  color: var(--muted, #52615b);
+}
+.account-tabs,
+.account-actions,
+.account-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.account-tabs button[aria-pressed="true"] {
+  background: #1e4b3d;
+  color: #fff;
+}
+.account-panel .account-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.account-checkbox input {
+  width: auto;
+}
+.account-game-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.6rem;
+}
+.account-game-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+}
+.account-game-list span,
+.account-game-list strong {
+  overflow-wrap: anywhere;
+}
+.account-game-list li > button:first-child {
+  width: 100%;
+  text-align: left;
+  display: grid;
+  gap: 0.25rem;
+}
+.account-game-list li > button:only-child {
+  width: 100%;
+}
+.recovery-kit,
+.account-delete {
+  padding: 0.8rem;
+  border: 2px solid #bc8038;
+  border-radius: 0.7rem;
+  background: #fff5df;
+}
+.recovery-kit code {
+  overflow-wrap: anywhere;
+}
+.recovery-kit ol {
+  padding-left: 1.5rem;
+  margin: 0.3rem 0;
+}
+.account-replay-board {
+  width: 100%;
+  max-width: calc(75vh - 160px);
+  margin-inline: auto;
+  scroll-margin-top: 130px;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+.account-replay-board td {
+  padding: 0;
+  position: relative;
+  aspect-ratio: 1;
+  height: auto;
+  width: 12.5%;
+}
+.account-replay-board .piece {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.account-replay-board .light {
+  background: #efe8d6;
+}
+.account-replay-board .dark {
+  background: #729483;
+}
+.account-replay-board td > span {
+  position: absolute;
+  left: 2px;
+  bottom: 0;
+  font-size: 0.55rem;
+  color: #203b32;
+}
+.account-replay-board td:empty::after {
+  content: "";
+  display: block;
+  padding-top: 100%;
+}
+.replay-controls {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.replay-control-panel {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  gap: 8px;
+  padding: 8px 0;
+  background: var(--paper, #fffdf7);
+  border-bottom: 1px solid var(--line, #e1dfd3);
+}
+.account-replay-moves {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  max-height: 8rem;
+  overflow-y: auto;
+  padding-left: 1.5rem;
+}
+.account-replay-moves button[aria-current="step"] {
+  background: #1e4b3d;
+  color: white;
+}
+.account-panel .error-text {
+  color: #8c2323;
+}
+.account-actions a {
+  padding: 0.6rem;
+  color: #1e4b3d;
+  text-decoration: underline;
+}
+.account-filters label {
+  flex: 1;
+  min-width: 100px;
+}
+.account-replay-board td::before {
+  content: "";
+  display: block;
+  padding-top: 100%;
+}
+.account-replay-board td > .piece {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+}

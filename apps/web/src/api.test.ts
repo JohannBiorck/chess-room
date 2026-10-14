@@ -46,6 +46,11 @@ afterEach(() => {
 describe("requests while a service starts", () => {
   it.each([
     { path: "/api/session", body: undefined },
+    { path: "/api/account", body: undefined },
+    {
+      path: "/api/bot-games",
+      body: { rulesetId: "catchess", color: "white", profile: "balanced" },
+    },
     { path: "/api/session", body: { displayName: "Alex" } },
     { path: "/api/games", body: { rulesetId: "standard", color: "white", timeControl: "untimed" } },
     { path: "/api/invitations/join", body: { token: "invitation-code" } },
@@ -93,20 +98,24 @@ describe("requests while a service starts", () => {
       },
     },
     { path: "/api/games/00000000-0000-4000-8000-000000000001", body: undefined },
-  ])("keeps the twelve-second deadline for active game request $path", async ({ path, body }) => {
-    const fetch = respondAfter(15_000);
-    let failure: unknown;
-    const pending = request(path, body).catch((error: unknown) => {
-      failure = error;
-    });
-    await vi.advanceTimersByTimeAsync(11_999);
-    expect(failure).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(1);
-    await pending;
-    expect(failure).toBeInstanceOf(ApiError);
-    expect(failure).toMatchObject({ code: "NETWORK", status: 0 });
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(fetch).toHaveBeenCalledTimes(1);
-    if (body) expect(fetch.mock.calls[0]?.[1]?.body).toBe(JSON.stringify(body));
-  });
+    { path: "/api/account", body: undefined, method: "DELETE" as const },
+  ])(
+    "keeps the twelve-second deadline for active request $path",
+    async ({ path, body, method }) => {
+      const fetch = respondAfter(15_000);
+      let failure: unknown;
+      const pending = request(path, body, method).catch((error: unknown) => {
+        failure = error;
+      });
+      await vi.advanceTimersByTimeAsync(11_999);
+      expect(failure).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+      expect(failure).toBeInstanceOf(ApiError);
+      expect(failure).toMatchObject({ code: "NETWORK", status: 0 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      if (body) expect(fetch.mock.calls[0]?.[1]?.body).toBe(JSON.stringify(body));
+    },
+  );
 });

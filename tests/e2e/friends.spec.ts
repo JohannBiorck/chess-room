@@ -13,10 +13,10 @@ import {
   expect,
   type Page,
   type Route,
-  test,
   type WebSocketRoute,
 } from "@playwright/test";
 import { Pool } from "pg";
+import { test } from "./fixtures";
 
 type Players = {
   host: Page;

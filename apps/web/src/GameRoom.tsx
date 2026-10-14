@@ -20,7 +20,10 @@ import { CopyIcon, FlipIcon, LinkIcon } from "./Icons";
 import { Modal } from "./Modal";
 import type { PendingMove } from "./movePreview";
 import { Piece, pieceNames } from "./Piece";
+import { PresentationSettings } from "./PresentationSettings";
+import { movementId, moveTransition, type PresentationEvent } from "./presentationEvents";
 import type { Invitation } from "./useChessRoom";
+import { useGamePresentation } from "./useGamePresentation";
 
 const reasonLabels: Record<GameOutcome["reason"], string> = {
   checkmate: "Checkmate",
@@ -40,10 +43,19 @@ const reasonLabels: Record<GameOutcome["reason"], string> = {
   "king-captured": "King captured",
 };
 
+const NO_PRESENTATION_EVENTS: PresentationEvent[] = [];
+export type BotThinkingState = {
+  status: "loading" | "thinking" | "paused" | "error";
+  message?: string;
+};
+
 type GameRoomProps = {
   view: GameView;
   liveCatEffects: CatEffect[];
   pendingMove: PendingMove | null;
+  presentationEvents?: PresentationEvent[];
+  botThinking?: BotThinkingState | null;
+  guestSession?: boolean;
   invitation: Invitation | null;
   receivedAt: number;
   busy: boolean;
@@ -60,6 +72,9 @@ export function GameRoom({
   view,
   liveCatEffects,
   pendingMove,
+  presentationEvents = NO_PRESENTATION_EVENTS,
+  botThinking = null,
+  guestSession = true,
   invitation,
   receivedAt,
   busy,
@@ -72,6 +87,10 @@ export function GameRoom({
   onLobby,
 }: GameRoomProps) {
   const { game, seat } = view;
+  const presentation = useGamePresentation(game.id, presentationEvents);
+  const pendingStarted = useRef({ commandId: "", at: 0 });
+  if (pendingMove && pendingStarted.current.commandId !== pendingMove.commandId)
+    pendingStarted.current = { commandId: pendingMove.commandId, at: performance.now() };
   const [orientation, setOrientation] = useState<Color>(seat ?? "white");
   const [now, setNow] = useState(Date.now());
   const [promotion, setPromotion] = useState<MoveInput[] | null>(null);
@@ -136,6 +155,28 @@ export function GameRoom({
   const preview =
     pendingMove?.gameId === game.id && pendingMove.revision === game.revision ? pendingMove : null;
   const lastMove = game.position.moves.at(-1);
+  const lastEvent = presentationEvents.at(-1);
+  const confirmedMovement =
+    lastEvent?.gameId === game.id &&
+    lastEvent.kind === "move" &&
+    lastEvent.ply === game.position.moves.length
+      ? {
+          id: lastEvent.movementId,
+          transition: lastEvent.transition,
+          createdAt: lastEvent.createdAt,
+        }
+      : null;
+  const pendingTransition = preview
+    ? moveTransition(game.position.board, game.position.legalMoves, preview.move)
+    : null;
+  const movement =
+    preview && pendingTransition
+      ? {
+          id: movementId(game.id, preview.ply, preview.move),
+          transition: pendingTransition,
+          createdAt: pendingStarted.current.at,
+        }
+      : confirmedMovement;
   const boardLastMove = preview?.move ?? lastMove;
   const effectsByPly = new Map(
     (game.position.catEffects ?? []).map((effect) => [effect.ply, effect]),
@@ -240,10 +281,13 @@ export function GameRoom({
     <main id="main" tabIndex={-1} className="game-room">
       <div className="game-heading">
         <div>
-          <p className="eyebrow">{openRoom ? "YOUR OPEN TABLE" : "YOUR PRIVATE TABLE"}</p>
+          <p className="eyebrow">
+            {game.bot ? "YOUR CAT TABLE" : openRoom ? "YOUR OPEN TABLE" : "YOUR PRIVATE TABLE"}
+          </p>
           <h1>{rule?.label ?? "Chess"}</h1>
         </div>
         <div className="game-heading-actions">
+          <PresentationSettings compact />
           <span className={`connection connection--${connection}`} role="status">
             <span className="status-dot" />
             {connection === "connected"
@@ -294,6 +338,7 @@ export function GameRoom({
             canMove={canMove}
             busy={busy}
             revision={game.revision}
+            movement={movement}
             {...(boardLastMove ? { lastMove: boardLastMove } : {})}
             onMove={move}
           />
@@ -311,7 +356,7 @@ export function GameRoom({
         </section>
         <aside className="match-panel" aria-label="Game information">
           <section
-            className={`game-status${finished ? " game-status--finished" : ""}`}
+            className={`game-status${finished ? " game-status--finished" : ""}${presentation.resultEmphasis ? " game-status--result-arrival" : ""}`}
             aria-labelledby="status-heading"
           >
             <p className="eyebrow">
@@ -326,6 +371,26 @@ export function GameRoom({
             <h2 id="status-heading" aria-live="polite" aria-atomic="true">
               {status}
             </h2>
+            {botThinking && active && (
+              <div
+                className={`bot-thinking bot-thinking--${botThinking.status}${presentation.reduced || !presentation.visible ? " bot-thinking--still" : ""}`}
+                role="status"
+              >
+                <span className="bot-thinking-cat" aria-hidden="true">
+                  <Cat />
+                </span>
+                <span>
+                  {botThinking.message ??
+                    (botThinking.status === "loading"
+                      ? "Cat Bot is getting ready…"
+                      : botThinking.status === "thinking"
+                        ? "Cat Bot is thinking…"
+                        : botThinking.status === "paused"
+                          ? "Cat Bot is paused."
+                          : "Cat Bot could not finish thinking. Try again.")}
+                </span>
+              </div>
+            )}
             {finished && game.outcome ? (
               <p>{reasonLabels[game.outcome.reason]}</p>
             ) : game.phase === "waiting" ? (
@@ -348,7 +413,9 @@ export function GameRoom({
                         ? "Select one of your pieces to see its legal moves."
                         : openRoom
                           ? "Take a moment. Your opponent is thinking."
-                          : "Take a moment. Your friend is thinking."}
+                          : game.bot
+                            ? "Take a moment. Cat Bot is thinking."
+                            : "Take a moment. Your friend is thinking."}
               </p>
             )}
             {game.phase === "waiting" && openRoom && (
@@ -463,7 +530,7 @@ export function GameRoom({
               <p>Close this waiting room to prevent anyone joining.</p>
             </section>
           )}
-          {incomingDraw && (
+          {incomingDraw && !game.bot && (
             <section className="decision-panel" aria-label="Draw offer">
               <h3>Your friend offered a draw</h3>
               <p>Accept to finish this game as a draw, or continue playing.</p>
@@ -493,11 +560,13 @@ export function GameRoom({
               <p>
                 {game.rematchGameId
                   ? "Your next board is ready. Colors are swapped for the rematch."
-                  : incomingRematch && !ownRematch
-                    ? "Your friend is ready for a rematch. Play again with swapped colors."
-                    : ownRematch
-                      ? "Rematch requested. Waiting for your friend to accept."
-                      : "Keep the same rules and time control. Swap colors and start fresh."}
+                  : game.bot
+                    ? "Play the same cat profile and rules again, with colors swapped."
+                    : incomingRematch && !ownRematch
+                      ? "Your friend is ready for a rematch. Play again with swapped colors."
+                      : ownRematch
+                        ? "Rematch requested. Waiting for your friend to accept."
+                        : "Keep the same rules and time control. Swap colors and start fresh."}
               </p>
               <button
                 type="button"
@@ -513,11 +582,13 @@ export function GameRoom({
               >
                 {game.rematchGameId
                   ? "Go to rematch"
-                  : ownRematch
-                    ? "Waiting for your friend…"
-                    : incomingRematch
-                      ? "Accept rematch"
-                      : "Request rematch"}
+                  : game.bot
+                    ? "Play the cat again"
+                    : ownRematch
+                      ? "Waiting for your friend…"
+                      : incomingRematch
+                        ? "Accept rematch"
+                        : "Request rematch"}
               </button>
             </section>
           )}
@@ -576,14 +647,16 @@ export function GameRoom({
           </section>
           {active && seat && (
             <section className="game-actions" aria-label="Game actions">
-              <button
-                type="button"
-                className="button button--small"
-                disabled={busy || offeredDraw || incomingDraw}
-                onClick={() => void onCommand({ type: "offer-draw" })}
-              >
-                {offeredDraw ? "Draw offered" : "Offer draw"}
-              </button>
+              {!game.bot && (
+                <button
+                  type="button"
+                  className="button button--small"
+                  disabled={busy || offeredDraw || incomingDraw}
+                  onClick={() => void onCommand({ type: "offer-draw" })}
+                >
+                  {offeredDraw ? "Draw offered" : "Offer draw"}
+                </button>
+              )}
               <button
                 type="button"
                 className="button button--small button--danger"
@@ -634,10 +707,18 @@ export function GameRoom({
               repetition and seventy-five-move draws are automatic. Clocks continue during
               disconnections and service interruptions.
             </p>
-            <p>
-              Guest seats belong to this browser’s cookie. A display name cannot recover a lost
-              seat.
-            </p>
+            {game.bot && (
+              <p>
+                Cat Bot does not offer or accept agreed draws. Legal draw claims and automatic game
+                results still apply.
+              </p>
+            )}
+            {guestSession && (
+              <p>
+                Guest seats belong to this browser’s cookie. A display name cannot recover a lost
+                seat.
+              </p>
+            )}
           </details>
         </aside>
       </div>
@@ -673,7 +754,11 @@ export function GameRoom({
       )}
       {resigning && (
         <Modal title="Resign this game?" onClose={() => setResigning(false)}>
-          <p>Your friend will win this game. You can still request a rematch afterwards.</p>
+          <p>
+            {game.bot
+              ? "Cat Bot will win this game. You can play again afterwards."
+              : "Your friend will win this game. You can still request a rematch afterwards."}
+          </p>
           <div className="button-row">
             <button
               className="button button--danger"

@@ -1,6 +1,7 @@
 import type { BoardPiece, CatEffect, Color, MoveInput } from "@chess-room/contracts";
 import { useEffect, useRef, useState } from "react";
 import { CatVisit, useCatVisit } from "./CatVisit";
+import { type BoardMovement, MoveAnimation, useMoveAnimation } from "./MoveAnimation";
 import { Piece, pieceNames } from "./Piece";
 
 export function boardSquares(orientation: Color): string[] {
@@ -46,6 +47,7 @@ type BoardProps = {
   busy: boolean;
   revision: number;
   lastMove?: MoveInput;
+  movement?: BoardMovement | null;
   onMove: (moves: MoveInput[]) => void;
 };
 
@@ -65,15 +67,19 @@ export function Board({
   busy,
   revision,
   lastMove,
+  movement = null,
   onMove,
 }: BoardProps) {
   const [selected, setSelected] = useState<string | null>(null);
   const [focused, setFocused] = useState(56);
   const boardRef = useRef<HTMLTableElement>(null);
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
   const squares = boardSquares(orientation);
   const bySquare = new Map(board.map((piece) => [piece.square, piece]));
   const available = selected && canMove ? legalMoves.filter((move) => move.from === selected) : [];
-  const visit = useCatVisit(gameId, catEffects);
+  const layoutKey = `${gameId}:${orientation}:${layoutEpoch}`;
+  const moveAnimation = useMoveAnimation(movement, layoutKey);
+  const visit = useCatVisit(gameId, catEffects, latestPly, layoutKey);
   const effect = visit.active;
   const targetPiece = effect?.square ? bySquare.get(effect.square) : undefined;
   const depictsCurrentPosition = effect !== null && effect.ply === latestPly;
@@ -84,6 +90,21 @@ export function Board({
     void revision;
     setSelected(null);
   }, [revision]);
+
+  useEffect(() => {
+    const board = boardRef.current;
+    if (!board || typeof ResizeObserver === "undefined") return;
+    let width = board.clientWidth;
+    const observer = new ResizeObserver((entries) => {
+      const next = entries[0]?.contentRect.width;
+      if (next !== undefined && Math.abs(next - width) > 1) {
+        width = next;
+        setLayoutEpoch((epoch) => epoch + 1);
+      }
+    });
+    observer.observe(board);
+    return () => observer.disconnect();
+  }, []);
 
   function select(square: string) {
     if (!canMove || busy) return;
@@ -132,6 +153,12 @@ export function Board({
                     square === effect?.square &&
                     piece?.type === (effect?.piece ?? "p") &&
                     piece.color === effect.color;
+                  const travellingPiece = moveAnimation?.transition.moving.some(
+                    (actor) =>
+                      actor.to === square &&
+                      piece?.color === actor.piece.color &&
+                      piece?.type === (actor.promotion ?? actor.piece.type),
+                  );
                   const label = `${square}, ${piece ? `${piece.color} ${pieceNames[piece.type]}` : "empty"}${selected === square ? ", selected" : ""}${target ? ", legal destination" : ""}${checked ? (kingCapture ? ", king exposed" : ", in check") : ""}`;
                   return (
                     <td key={square}>
@@ -180,7 +207,11 @@ export function Board({
                         {piece && (
                           <span
                             className={
-                              pendingPiece ? "board-piece board-piece--cat-arrival" : "board-piece"
+                              pendingPiece
+                                ? "board-piece board-piece--cat-arrival"
+                                : travellingPiece
+                                  ? "board-piece board-piece--travelling"
+                                  : "board-piece"
                             }
                           >
                             <Piece type={piece.type} color={piece.color} />
@@ -200,6 +231,13 @@ export function Board({
             ))}
           </tbody>
         </table>
+        {moveAnimation && (
+          <MoveAnimation
+            key={moveAnimation.id}
+            movement={moveAnimation}
+            orientation={orientation}
+          />
+        )}
         {effect && (
           <CatVisit
             key={`${gameId}:${effect.ply}`}

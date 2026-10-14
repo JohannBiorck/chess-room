@@ -1,13 +1,17 @@
 import { useEffect, useState } from "react";
+import { AccountPanel } from "./AccountPanel";
+import { BotTurnController } from "./BotTurnController";
 import { Cat } from "./Cat";
 import { DisplayNameEditor } from "./DisplayNameEditor";
 import { GameRoom } from "./GameRoom";
 import { Lobby } from "./Lobby";
+import { PresentationSettings } from "./PresentationSettings";
 import { useChessRoom } from "./useChessRoom";
 
 export function App() {
   const room = useChessRoom();
   const [editingName, setEditingName] = useState(false);
+  const [accountSignedIn, setAccountSignedIn] = useState(false);
   const hasSession = room.session !== null;
 
   useEffect(() => {
@@ -60,6 +64,14 @@ export function App() {
                 </svg>
               </button>
             )}
+            <AccountPanel
+              onIdentityChanged={room.identityChanged}
+              onAccountChanged={setAccountSignedIn}
+              onResumeGame={(id) => {
+                void room.openGame(id);
+              }}
+            />
+            {!room.view && <PresentationSettings compact />}
           </div>
         </header>
         {(room.error || room.retry) && (
@@ -120,25 +132,38 @@ export function App() {
           <main id="main" className="loading-panel" tabIndex={-1}>
             <span className="loading-ring" aria-hidden="true" />
             <h1>Waking the cats…</h1>
-            <p role="status">Connecting to your guest session.</p>
+            <p role="status">Connecting to your player session.</p>
           </main>
         ) : room.view ? (
-          <GameRoom
-            key={room.view.game.id}
-            view={room.view}
-            liveCatEffects={room.liveCatEffects}
-            pendingMove={room.pendingMove}
-            invitation={room.invitation}
-            receivedAt={room.receivedAt}
-            busy={room.busy}
-            commandError={room.error}
-            connection={room.connection}
-            onCommand={room.command}
-            onReconnect={room.reconnect}
-            onInvitation={room.renewInvitation}
-            onRematch={room.openRematch}
-            onLobby={room.lobby}
-          />
+          <>
+            {room.view.game.bot && (
+              <BotTurnController
+                game={room.view.game}
+                onConfirmed={room.confirmBotView}
+                onRefresh={() => {
+                  void room.reconnect();
+                }}
+              />
+            )}
+            <GameRoom
+              key={room.view.game.id}
+              view={room.view}
+              liveCatEffects={room.liveCatEffects}
+              presentationEvents={room.presentationEvents}
+              guestSession={!accountSignedIn}
+              pendingMove={room.pendingMove}
+              invitation={room.invitation}
+              receivedAt={room.receivedAt}
+              busy={room.busy}
+              commandError={room.error}
+              connection={room.connection}
+              onCommand={room.command}
+              onReconnect={room.reconnect}
+              onInvitation={room.renewInvitation}
+              onRematch={room.openRematch}
+              onLobby={room.lobby}
+            />
+          </>
         ) : (
           <Lobby
             session={room.session}
@@ -147,6 +172,11 @@ export function App() {
             onResume={room.reconnect}
             busy={room.busy}
             onCreate={room.create}
+            onCreateBot={room.createBot}
+            activeBotId={room.activeBotId}
+            onResumeBot={() =>
+              room.activeBotId ? room.openGame(room.activeBotId) : Promise.resolve()
+            }
             onJoin={room.join}
             openRooms={room.openRooms}
             roomsLoading={room.roomsLoading}

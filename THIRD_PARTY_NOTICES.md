@@ -1,5 +1,15 @@
 # Third-party notices
 
+## SimpleWebAuthn
+
+Passkey authentication uses `@simplewebauthn/server` 14.0.3 and
+`@simplewebauthn/browser` 14.0.0, under the MIT license.
+Copyright (c) 2020 Matthew Miller.
+The complete notice is bundled at
+[`apps/web/public/licenses/simplewebauthn.txt`](apps/web/public/licenses/simplewebauthn.txt).
+Source and documentation: [SimpleWebAuthn](https://github.com/MasterKale/SimpleWebAuthn).
+No external authentication service is called by the application.
+
 ## Classic chess piece artwork
 
 The chess piece illustrations in `apps/web/src/pieces/Classic.tsx` are

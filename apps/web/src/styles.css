@@ -96,6 +96,8 @@ p {
 }
 .wordmark {
   display: flex;
+  flex-shrink: 0;
+  white-space: nowrap;
   align-items: center;
   text-decoration: none;
   font-family: Georgia, serif;
@@ -114,6 +116,8 @@ p {
 }
 .header-meta {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 18px;
   font-size: 13px;
@@ -1503,6 +1507,12 @@ fieldset legend {
   .site-header {
     min-height: 85px;
     gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px 0;
+  }
+  .header-meta {
+    flex: 1 1 180px;
+    gap: 8px;
   }
   .wordmark {
     font-size: 23px;
@@ -2242,5 +2252,189 @@ fieldset legend {
   }
   .board-piece--cat-arrival {
     visibility: visible;
+  }
+}
+
+.presentation-settings {
+  position: relative;
+  font-size: 12px;
+}
+.presentation-settings summary {
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  color: var(--green);
+  background: #fffef9;
+}
+.presentation-settings-body {
+  display: grid;
+  gap: 11px;
+  padding: 18px;
+  background: #fffef9;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.presentation-settings--compact .presentation-settings-body {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+  width: min(290px, calc(100vw - 42px));
+  box-shadow: 0 8px 30px #18312b1a;
+}
+.presentation-settings-body label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+}
+.presentation-settings-body .field-hint {
+  margin: 0;
+  line-height: 1.6;
+}
+.presentation-settings-body input[type="range"] {
+  accent-color: var(--green);
+  width: 100%;
+}
+.presentation-settings-body select {
+  width: 100%;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--ink);
+  background: #fffef9;
+}
+.board-piece--travelling {
+  visibility: hidden;
+}
+.move-layer {
+  position: absolute;
+  inset: var(--board-frame);
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 3;
+}
+.move-travelling-piece,
+.move-captured-piece {
+  position: absolute;
+  width: 12.5%;
+  height: 12.5%;
+}
+.move-travelling-piece {
+  animation: piece-travel var(--move-duration) cubic-bezier(0.2, 0.65, 0.25, 1) both;
+}
+.move-original-piece,
+.move-promoted-piece {
+  position: absolute;
+  inset: 6%;
+}
+.move-travelling-piece--promotion .move-original-piece {
+  animation: promotion-pawn var(--move-duration) linear both;
+}
+.move-promoted-piece {
+  animation: promotion-piece var(--move-duration) linear both;
+}
+.move-captured-piece {
+  animation: piece-captured 120ms ease-out both;
+}
+.move-layer .move-captured-piece > .piece {
+  width: 88%;
+  height: 88%;
+  margin: 6%;
+}
+@keyframes piece-travel {
+  from {
+    transform: translate(0, 0);
+  }
+  to {
+    transform: translate(var(--move-x), var(--move-y));
+  }
+}
+@keyframes piece-captured {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@keyframes promotion-pawn {
+  0%,
+  65% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes promotion-piece {
+  0%,
+  65% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+.game-status--result-arrival {
+  animation: result-arrival 450ms ease-out both;
+}
+@keyframes result-arrival {
+  from {
+    box-shadow: inset 0 0 0 2px #d8be7199;
+  }
+  to {
+    box-shadow: inset 0 0 0 2px #d8be7100;
+  }
+}
+.bot-thinking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.bot-thinking-cat {
+  width: 52px;
+  flex-shrink: 0;
+}
+.bot-thinking--thinking .cat-tail {
+  transform-origin: 30px 65px;
+  animation: thinking-tail 1.4s ease-in-out infinite alternate;
+}
+.bot-thinking--still .cat-tail {
+  animation: none;
+}
+@keyframes thinking-tail {
+  from {
+    transform: rotate(-4deg);
+  }
+  to {
+    transform: rotate(4deg);
+  }
+}
+@media (max-width: 620px) {
+  .game-heading-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .presentation-settings summary {
+    padding: 8px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .move-layer {
+    display: none;
+  }
+  .board-piece--travelling {
+    visibility: visible;
+  }
+  .game-status--result-arrival,
+  .bot-thinking--thinking .cat-tail {
+    animation: none;
   }
 }

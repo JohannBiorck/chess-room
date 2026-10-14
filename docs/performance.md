@@ -136,3 +136,33 @@ longer scenarios on documented hardware, vary game history length, measure
 pool/lock waits and worker lag, and test instance/database failure while games
 are active. Optimize measured bottlenecks before introducing another shared
 service or claiming higher capacity.
+
+## Browser bot measurement, 2026-10-14
+
+The original `cat-search-v1` engine runs in a lazy browser Worker. Its production
+bundle is 158,091 bytes before compression and 45,979 bytes gzip. This adds no
+search process or model API to the backend. Balanced caps search at 700 ms and
+8,000 nodes; Strong caps it at 1,800 ms and 24,000 nodes. Smaller devices use
+the lighter budget. The server validates the resulting proposal independently.
+
+An isolated headless Edge 155.0.4283.45 run on the laptop described above tested
+one starting position in each of the four modes using the actual built Worker.
+Search took 1,801–1,802 ms under the Strong budget; total dispatch-to-result time
+was 1,841–1,875 ms. The observer saw no main-thread long tasks during those four
+jobs, although one job had a 283 ms frame gap. This harness does not measure
+end-to-end input latency or guarantee uninterrupted rendering.
+
+At 390 px with emulated 4× CPU slowdown, two cat-mode jobs under a 700 ms budget
+returned legal moves in 791–793 ms including dispatch. This is browser emulation,
+not evidence from a physical phone. Worker heap sampling every 40 ms observed
+7.52 MiB used and 13 MiB allocated across 192 samples; it can miss short peaks.
+Terminating a search delivered no later result during the cancellation check.
+
+A small 32-game paired-color pilot compared search against capture-greedy and
+exact one-ply baselines, using 60 ms/2,000-node caps and a 64-ply cutoff. Search
+won 17 games, lost none and left 15 unfinished. Unfinished games were not counted
+as draws. Deterministic-mode seeds repeat conditions, and the cat-mode sample
+has too many unfinished games to rank close strengths. This is a sanity check,
+not an Elo estimate or a comparison with a mature chess engine. Longer games,
+independent chance trials and physical-device measurements remain necessary
+before publishing stronger performance or playing-strength claims.

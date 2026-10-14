@@ -38,6 +38,20 @@ it is not a runtime or hosted-service credential. Use the placeholders in
 `.env.example` with a disposable local database. CI supplies separate local
 application and administrator credentials for the same checks.
 
+`npm run test:e2e` isolates each browser run in a freshly migrated schema,
+selected through `TEST_DATABASE_URL` or otherwise `DATABASE_URL`. Use an
+ordinary local database owner with schema creation rights, never a hosted
+connection. The runner accepts only loopback PostgreSQL URLs without query
+parameters or a fragment. It starts its own server on port 5174 and drops only
+its generated schema after confirming server shutdown, including after failed
+checks. If shutdown or cleanup cannot be confirmed, it prints the disposable
+schema name and fails; stop the browser-test server before removing that
+schema. Existing application schemas and data are never removed.
+An automatic fixture resets synthetic games and identities between browser
+tests only after contexts close and the runner's schema is verified. The
+rate-limit table and migration records remain intact, so session-budget waits
+still exercise the production guards.
+
 The Compose recipe gives the application a non-superuser database login.
 For production, use separate migration and application roles and grant only
 the application's required table/sequence operations. Protect connection
@@ -45,6 +59,12 @@ credentials, restrict PostgreSQL network access, and use authenticated TLS
 when the database is reached across an untrusted network.
 
 ## HTTPS, origin and proxy configuration
+
+Use `http://localhost:5173` for local development and the matching `WEB_ORIGIN`.
+Passkeys bind to the exact game origin and hostname. The current shortcut
+`catchess.onrender.com` redirects to `chess-room-c09w.onrender.com`, which is the
+actual production RP. Changing that hostname after enrollment requires a
+passkey migration or reenrollment; a redirect does not move credentials.
 
 Set `NODE_ENV=production` and `WEB_ORIGIN` to the exact HTTPS browser origin,
 for example `https://chess.example`. A path, wildcard or HTTP production origin
@@ -127,6 +147,34 @@ measured local baseline and its limits.
 
 ## Retention
 
+Account history is private and retains up to 500 games for 365 days. It uses
+transactional archives separate from the 30-day operational match window.
+Before deleting operational games, required archives must exist. Account-owned
+unfinished games survive login expiry; games with no human activity for 30 days
+are abandoned by cleanup. Guest games retain their guest expiry behavior.
+
+The database remains on its existing Free plan. Storage admission reserves
+64 MiB per game against an 800 MiB application budget, counts current relation
+sizes plus conservative 64 MiB database overhead, and reduces reservations when
+games finish or expire. It also holds 8 MiB for bounded anonymous authentication
+challenges and 1 MiB per account for future identity metadata. Each account has
+at most 16 browser sessions, ten passkeys and 128 imported identities; a new
+login beyond the session limit signs out the oldest session. Recovery grants
+are restricted to one per account. Challenges expire after five minutes and
+are bounded to three per browser flow, eight per account and 2,048 in the schema.
+This assumes one application schema in the database;
+other schema workloads must be accounted for before sharing the allocation.
+New games can be refused near capacity while existing games remain playable.
+Repeated commands are bounded at 1,500 per game. No automatic paid upgrade,
+external engine, keep-alive service, email service or telemetry is configured.
+
+Migration `003_accounts_history.sql` is additive: stable identities, passkeys,
+account sessions/recovery, archives, preferences, reservations and compressed
+receipts. Use the migration owner; grant the expanded explicit table allowlist
+to the restricted runtime role. Rollback requires a build that understands
+account-owned identities and archives; do not roll straight back to a
+pre-account binary after guest claims or delete the new tables.
+
 The background worker performs bounded cleanup at startup and approximately
 hourly:
 
@@ -145,7 +193,7 @@ Expired waiting rooms remain unjoinable and unlisted even if the worker has
 not yet persisted their closure. Startup and authenticated snapshots reconcile
 overdue rooms after a sleeping server wakes; no uptime pings are required.
 Active games are preserved while either participant has a valid session. When
-both sessions expire, a bounded worker pass locks and finishes the game as an
+both guest sessions expire, a bounded worker pass locks and finishes the game as an
 abandoned draw with reason `session-expired`. It then follows the finished-game
 retention period. Export a game's PGN before its retention period ends when a
 permanent record is wanted.

@@ -3,6 +3,8 @@ import type { BoardPiece, MoveInput } from "@chess-room/contracts";
 export type PendingMove = {
   gameId: string;
   revision: number;
+  commandId: string;
+  ply: number;
   move: MoveInput;
   board: BoardPiece[];
 };

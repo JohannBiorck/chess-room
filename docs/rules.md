@@ -162,21 +162,60 @@ With an opponent who can add pawns, an existing bishop or knight may also use
 that future opposing material in a possible mate. Otherwise the standard
 material test applies.
 
-Either player may resign. A draw offer requires the other player's acceptance;
-a player cannot accept their own offer. Finished games reject further moves.
-A mutually accepted rematch creates a distinct game, preserves the rules and
-time control, and exchanges the players' colors.
+Either player may resign. In a game between friends, a draw offer requires the
+other player's acceptance; a player cannot accept their own offer. Finished
+games reject further moves. A mutually accepted rematch creates a distinct
+game, preserves the rules and time control, and exchanges the players' colors.
 
-Guest sessions expire after 30 days. If both players' sessions expire while a
-game is still active, the background worker finishes it as an abandoned draw
-with reason `session-expired`. A game with a player whose session remains
-valid is preserved. Finished games remain subject to the 30-day retention
-policy described in [operations](operations.md).
+Guest sessions expire after 30 days. Account-owned seats survive sign-out and
+login-session expiry: signing in to the same account restores access. The
+background worker abandons an active game only when no human seat has either
+a valid guest session or an account with game activity in the past 30 days.
+Account inactivity is measured from the game's last accepted update, rather
+than the lifetime of an individual login. Abandonment draws use reason
+`session-expired`. Finished operational games remain subject to the separate
+30-day retention policy described in [operations](operations.md).
 
 Every game is limited to 1,200 accepted half-moves. A game that reaches this
 resource limit draws automatically unless its last move already wins or
 triggers an earlier automatic draw. This bound limits stored history and
 replay work; it is an application policy rather than a tournament rule.
+
+Games also have a maximum of 1,500 accepted commands, including moves, draw
+offers and rematch requests. An active game draws before exhausting this
+budget, after at most 1,498 commands, leaving two commands to complete a
+rematch between friends. Existing accepted commands remain
+safe to retry at the limit: they return their saved acknowledgement without
+consuming another command or applying another cat effect.
+
+## Cat Bot
+
+Cat Bot supports all four rulesets in untimed, casual games. Its moves are
+searched on the player's device with a bounded thinking budget; the server
+still validates every move and decides the real cat effects. Pausing, leaving
+the page or reconnecting does not grant the bot another random turn. An
+unfinished game can be resumed, and each player can have one unfinished bot
+game at a time.
+
+The bot does not offer or accept agreed draws. A human player can still claim
+an eligible current-position draw on their turn or resign. Automatic outcomes
+and resource limits apply as in games between friends. Requesting a rematch
+starts a distinct untimed game immediately, preserves the rules, cat settings
+and bot profile, and exchanges colors.
+
+## Private match history
+
+Completed account games are saved in the participants' private match history.
+A player can replay positions, including the committed cat effects, and export
+JSON or annotated PGN. Eligible guest games are added only through an explicit
+import by the guest who owns the seat. Refreshing or replaying a saved match
+does not redraw its cat effects.
+
+History retains up to the latest 500 games per account for at most 365 days.
+Hiding a saved match removes it from that player's history; the opponent keeps
+their own copy. Deleting an account anonymizes that player's identity in the
+opponent's retained record. These archives have a separate lifetime from the
+operational game records used for live play.
 
 ## Adding modes
 
