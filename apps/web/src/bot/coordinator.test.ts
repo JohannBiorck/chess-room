@@ -172,4 +172,14 @@ describe("bot proposal and recovery boundary", () => {
     };
     expect(fallbackBotMove(exposed)).toEqual({ from: "e8", to: "e1" });
   });
+  it("the emergency fallback preserves its queen instead of capturing a defended knight", () => {
+    const game = fixture();
+    const position = inspectEngine(
+      createEngineState("chaos-cat", "r5k1/8/8/8/n7/8/8/Q5K1 w - - 0 1"),
+    );
+    expect(fallbackBotMove({ ...game, rulesetId: "chaos-cat", position })).not.toEqual({
+      from: "a1",
+      to: "a4",
+    });
+  });
 });

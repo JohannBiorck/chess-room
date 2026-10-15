@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 
-import { CAT_PAW_MS } from "./CatVisit";
 import type { PresentationEvent } from "./presentationEvents";
 import {
   usePageVisibility,
@@ -8,8 +7,9 @@ import {
   useReducedMotion,
 } from "./presentationPreferences";
 import { presentationAudio } from "./presentationSound";
+import { CAT_PAW_MS } from "./presentationTiming";
 
-export function useGamePresentation(gameId: string, events: PresentationEvent[]) {
+export function useGamePresentation(gameId: string, events: PresentationEvent[], catStartsAt = 0) {
   const preferences = usePresentationPreferences();
   const reduced = useReducedMotion();
   const visible = usePageVisibility();
@@ -36,11 +36,10 @@ export function useGamePresentation(gameId: string, events: PresentationEvent[])
       audio.cancel();
       return;
     }
-    for (const event of events) {
-      if (event.gameId === gameId && performance.now() - event.createdAt < 1500)
-        audio.present(event, reduced ? 0 : CAT_PAW_MS);
-    }
-  }, [audio, events, gameId, reduced]);
+    const event = events.at(-1);
+    if (event?.gameId === gameId && performance.now() - event.createdAt < 1500)
+      audio.present(event, reduced ? 0 : Math.max(0, catStartsAt - performance.now()) + CAT_PAW_MS);
+  }, [audio, events, gameId, catStartsAt, reduced]);
 
   useEffect(() => {
     setResultEmphasis(false);

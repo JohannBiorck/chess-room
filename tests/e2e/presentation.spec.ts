@@ -11,11 +11,109 @@ type Audit = {
   previewMs: number[];
 };
 type Players = { host: Page; friend: Page; contexts: BrowserContext[]; errors: string[] };
+type TurnObservation = {
+  maxBoardDrift: number;
+  maxScrollDrift: number;
+  maxStatusHeightDrift: number;
+  moveStarted: number | null;
+  moveEnded: number | null;
+  catStarted: number | null;
+  catEnded: number | null;
+  prematureGift: boolean;
+  missingTheft: boolean;
+};
+
+async function observeTurn(page: Page) {
+  await page.evaluate(async () => {
+    const board = document.querySelector<HTMLElement>(".chessboard");
+    if (!board) throw new Error("Expected a chess board.");
+    const initial = board.getBoundingClientRect();
+    window.scrollTo(
+      0,
+      initial.top + window.scrollY - Math.max(16, (innerHeight - initial.height) / 2),
+    );
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+    const origin = board.getBoundingClientRect();
+    const status = document.querySelector<HTMLElement>(".game-status");
+    const statusHeight = status?.getBoundingClientRect().height ?? 0;
+    const scroll = window.scrollY;
+    const data: TurnObservation = {
+      maxBoardDrift: 0,
+      maxScrollDrift: 0,
+      maxStatusHeightDrift: 0,
+      moveStarted: null,
+      moveEnded: null,
+      catStarted: null,
+      catEnded: null,
+      prematureGift: false,
+      missingTheft: false,
+    };
+    let frame = 0;
+    const opacity = (element: Element | null) => {
+      if (!element) return 0;
+      const style = getComputedStyle(element);
+      return style.visibility === "hidden" ? 0 : Number(style.opacity);
+    };
+    const sample = () => {
+      const box = board.getBoundingClientRect();
+      data.maxBoardDrift = Math.max(
+        data.maxBoardDrift,
+        Math.abs(box.top - origin.top),
+        Math.abs(box.left - origin.left),
+        Math.abs(box.width - origin.width),
+        Math.abs(box.height - origin.height),
+      );
+      data.maxScrollDrift = Math.max(data.maxScrollDrift, Math.abs(window.scrollY - scroll));
+      data.maxStatusHeightDrift = Math.max(
+        data.maxStatusHeightDrift,
+        Math.abs((status?.getBoundingClientRect().height ?? 0) - statusHeight),
+      );
+      const now = performance.now();
+      const moving = document.querySelector(".move-layer");
+      const cat = document.querySelector<HTMLElement>(".cat-target");
+      if (moving && data.moveStarted === null) data.moveStarted = now;
+      if (!moving && data.moveStarted !== null && data.moveEnded === null) data.moveEnded = now;
+      if (cat && data.catStarted === null) data.catStarted = now;
+      if (!cat && data.catStarted !== null && data.catEnded === null) data.catEnded = now;
+      const stage = document.querySelector<HTMLElement>(".board-stage");
+      const phase = stage?.dataset.catSequencePhase;
+      const square = stage?.dataset.catSequenceSquare;
+      if (square && (phase === "waiting" || phase === "arrive")) {
+        const base = document.querySelector(`[data-square="${square}"] .board-piece`);
+        const piece = cat?.querySelector(".cat-action-piece") ?? null;
+        if (
+          stage?.dataset.catSequenceAction === "add" &&
+          Math.max(opacity(base), opacity(piece)) > 0.05
+        )
+          data.prematureGift = true;
+        if (
+          stage?.dataset.catSequenceAction === "remove" &&
+          !moving &&
+          Math.max(opacity(base), opacity(piece)) < 0.95
+        )
+          data.missingTheft = true;
+      }
+      frame = requestAnimationFrame(sample);
+    };
+    sample();
+    Reflect.set(window, "turnObservation", { data, stop: () => cancelAnimationFrame(frame) });
+  });
+}
+
+async function turnObservation(page: Page, stop = false): Promise<TurnObservation> {
+  return page.evaluate((stop) => {
+    const observation = Reflect.get(window, "turnObservation");
+    if (stop) observation.stop();
+    return observation.data;
+  }, stop);
+}
 
 test.beforeAll(async () => {
   test.setTimeout(95_000);
-  // Other suites share the genuine per-IP guest-session guard. These two flows
-  // use four fresh guests after its window, without altering production limits.
+  // Other suites share the genuine per-IP guest-session guard. Start these
+  // flows after its full window without altering production limits.
   await new Promise((resolve) => setTimeout(resolve, 60_050));
 });
 
@@ -96,7 +194,11 @@ async function audit(context: BrowserContext) {
 async function readAudit(page: Page): Promise<Audit> {
   return page.evaluate(() => Reflect.get(window, "presentationAudit"));
 }
-async function createPlayers(browser: Browser): Promise<Players> {
+async function createPlayers(
+  browser: Browser,
+  evil = false,
+  hostName = "Motion host",
+): Promise<Players> {
   const hostContext = await browser.newContext({ baseURL: test.info().project.use.baseURL });
   const friendContext = await browser.newContext({ baseURL: test.info().project.use.baseURL });
   await audit(hostContext);
@@ -110,13 +212,13 @@ async function createPlayers(browser: Browser): Promise<Players> {
       console.error("Browser runtime error:", error.message);
     });
   await host.goto("/");
-  await host.getByLabel("Your display name", { exact: true }).fill("Motion host");
+  await host.getByLabel("Your display name", { exact: true }).fill(hostName);
   await host.getByLabel("Your pieces").selectOption("white");
   await host.getByRole("radio", { name: /Cat Chess/ }).check();
   for (const name of ["Your cat", "Friend’s cat"]) {
     const slider = host.getByRole("slider", { name, exact: true });
     await slider.focus();
-    await host.keyboard.press("End");
+    await host.keyboard.press(evil ? "Home" : "End");
   }
   await host.getByRole("button", { name: "Create private room", exact: true }).click();
   const invitation = await host.getByLabel("Private invitation link", { exact: true }).inputValue();
@@ -331,5 +433,171 @@ test("hidden turns stay silent without a backlog, then an enabled foreground tur
     expect(players.errors).toEqual([]);
   } finally {
     await finish(players);
+  }
+});
+
+test("the viewport stays still and each piece finishes before its helpful or evil cat arrives", async ({
+  browser,
+}, testInfo) => {
+  const path = testInfo.outputPath("turn-chronology-and-geometry.json");
+  const observations: Array<{
+    evil: boolean;
+    player: string;
+    turn: number;
+    data: TurnObservation;
+  }> = [];
+  for (const evil of [false, true]) {
+    const players = await createPlayers(browser, evil, "W".repeat(32));
+    try {
+      await players.friend.setViewportSize({ width: 320, height: 844 });
+      await players.friend.evaluate(() => {
+        const heading = document.querySelector<HTMLElement>(".status-heading-frame");
+        if (heading) heading.style.fontSize = "40px";
+        for (const paragraph of document.querySelectorAll<HTMLElement>(
+          ".status-description-frame p",
+        ))
+          paragraph.style.fontSize = "18px";
+      });
+      for (const [index, actor, moveInput] of [
+        [1, players.host, { from: "e2", to: "e4" }],
+        [2, players.friend, { from: "e7", to: "e5" }],
+      ] as const) {
+        for (const page of [players.host, players.friend]) {
+          await expect(page.locator(".move-layer, .cat-layer")).toHaveCount(0);
+          await observeTurn(page);
+        }
+        await move(actor, moveInput);
+        for (const [name, page] of [
+          ["host", players.host],
+          ["friend", players.friend],
+        ] as const) {
+          await expect.poll(async () => (await turnObservation(page)).catEnded).not.toBeNull();
+          const data = await turnObservation(page, true);
+          observations.push({ evil, player: name, turn: index, data });
+          await writeFile(path, JSON.stringify(observations, null, 2));
+          expect(data.maxBoardDrift).toBeLessThanOrEqual(1);
+          expect(data.maxScrollDrift).toBeLessThanOrEqual(1);
+          expect(data.maxStatusHeightDrift).toBeLessThanOrEqual(1);
+          expect(data.moveStarted).not.toBeNull();
+          expect(data.moveEnded).not.toBeNull();
+          expect(data.catStarted).not.toBeNull();
+          expect((data.moveEnded ?? 0) - (data.moveStarted ?? 0)).toBeGreaterThanOrEqual(300);
+          expect((data.catStarted ?? 0) - (data.moveEnded ?? 0)).toBeGreaterThanOrEqual(40);
+          expect((data.catEnded ?? 0) - (data.catStarted ?? 0)).toBeGreaterThanOrEqual(1800);
+          expect(data.prematureGift).toBe(false);
+          expect(data.missingTheft).toBe(false);
+        }
+        if (!evil && index === 1)
+          await players.friend.screenshot({
+            path: testInfo.outputPath("narrow-enlarged-status.png"),
+            fullPage: true,
+          });
+      }
+      expect(players.errors).toEqual([]);
+    } finally {
+      await finish(players);
+    }
+  }
+  await writeFile(path, JSON.stringify(observations, null, 2));
+  await testInfo.attach("turn-chronology-and-geometry", { path, contentType: "application/json" });
+});
+
+test("Cat Bot lets the live cat finish before moving, without shifting the board", async ({
+  browser,
+}, testInfo) => {
+  const context = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+  await audit(context);
+  const page = await context.newPage();
+  let observing = false;
+  try {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Play the cat", exact: true }).click();
+    await page.getByLabel("Your display name", { exact: true }).fill("Patient cat player");
+    await page.getByLabel("Your pieces", { exact: true }).selectOption("white");
+    await page.getByLabel("Cat’s thinking", { exact: true }).selectOption("balanced");
+    for (const name of ["Your cat", "Cat Bot’s cat"]) {
+      await page.getByRole("slider", { name, exact: true }).focus();
+      await page.keyboard.press("End");
+    }
+    await page.getByRole("button", { name: "Play the cat", exact: true }).last().click();
+    await expect(page.getByRole("heading", { name: "Your move", exact: true })).toBeVisible();
+    await observeTurn(page);
+    observing = true;
+    await move(page, { from: "e2", to: "e4" });
+    await expect(page.locator('[data-cat-ply="1"]')).toHaveAttribute("data-cat-phase", "paw");
+    expect((await game(page)).game.position.moves).toHaveLength(1);
+    await page.screenshot({ path: testInfo.outputPath("bot-cat-paw.png"), fullPage: true });
+    await expect.poll(async () => (await turnObservation(page)).catEnded).not.toBeNull();
+    expect((await turnObservation(page)).catEnded).not.toBeNull();
+    await expect.poll(async () => (await game(page)).game.position.moves.length).toBe(2);
+    await expect(page.locator('[data-cat-ply="2"]')).toBeVisible();
+    await expect(page.locator(".cat-layer")).toHaveCount(0);
+    const data = await turnObservation(page, true);
+    expect(data.maxBoardDrift).toBeLessThanOrEqual(1);
+    expect(data.maxScrollDrift).toBeLessThanOrEqual(1);
+    expect(data.maxStatusHeightDrift).toBeLessThanOrEqual(1);
+    expect((data.catEnded ?? 0) - (data.catStarted ?? 0)).toBeGreaterThanOrEqual(1800);
+    const fullSequencePath = testInfo.outputPath("bot-full-sequence.json");
+    await writeFile(fullSequencePath, JSON.stringify(data, null, 2));
+    await testInfo.attach("bot-full-sequence", {
+      path: fullSequencePath,
+      contentType: "application/json",
+    });
+    expect((await readAudit(page)).cats).toEqual(["1", "2"]);
+    const secondTurn = await game(page);
+    const legal = secondTurn.game.position.legalMoves.find((entry) => !entry.promotion);
+    if (!legal) throw new Error("Expected a legal follow-up move.");
+    await observeTurn(page);
+    await move(page, legal);
+    await expect(page.locator(".bot-status-slot")).toContainText("Letting the cat finish");
+    await page.evaluate(() => {
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect(page.locator(".bot-status-slot")).toContainText("paused until this tab returns");
+    expect((await game(page)).game.position.moves).toHaveLength(3);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    // The stored proposal resumes immediately: its canceled cat cannot create
+    // an invisible old-deadline wait or an animation backlog.
+    await expect
+      .poll(async () => (await game(page)).game.position.moves.length, { timeout: 1000 })
+      .toBe(4);
+    await expect(page.locator('[data-cat-ply="4"]')).toBeVisible();
+    await expect(page.locator(".cat-layer")).toHaveCount(0);
+    const catVisits = (await readAudit(page)).cats;
+    expect(new Set(catVisits).size).toBe(catVisits.length);
+    const resumed = await turnObservation(page, true);
+    expect(resumed.maxBoardDrift).toBeLessThanOrEqual(1);
+    expect(resumed.maxScrollDrift).toBeLessThanOrEqual(1);
+    expect(resumed.maxStatusHeightDrift).toBeLessThanOrEqual(1);
+    const current = await game(page);
+    await page.request.post(`/api/games/${current.game.id}/commands`, {
+      headers: { Origin: test.info().project.use.baseURL as string },
+      data: {
+        protocolVersion: 1,
+        commandId: crypto.randomUUID(),
+        expectedRevision: current.game.revision,
+        action: { type: "resign" },
+      },
+    });
+  } finally {
+    if (observing) {
+      const data = await turnObservation(page, true);
+      const path = testInfo.outputPath("bot-turn-geometry.json");
+      await writeFile(path, JSON.stringify(data, null, 2));
+      await testInfo.attach("bot-turn-geometry", { path, contentType: "application/json" });
+    }
+    await context.close();
   }
 });

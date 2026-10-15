@@ -139,11 +139,12 @@ service or claiming higher capacity.
 
 ## Browser bot measurement, 2026-10-14
 
-The original `cat-search-v1` engine runs in a lazy browser Worker. Its production
-bundle is 158,091 bytes before compression and 45,979 bytes gzip. This adds no
-search process or model API to the backend. Balanced caps search at 700 ms and
-8,000 nodes; Strong caps it at 1,800 ms and 24,000 nodes. Smaller devices use
-the lighter budget. The server validates the resulting proposal independently.
+The initial `cat-search-v1` engine in release `4dabf89` runs in a lazy browser
+Worker. Its production bundle is 158,091 bytes before compression and 45,979
+bytes gzip. This adds no search process or model API to the backend. Balanced
+caps search at 700 ms and 8,000 nodes; Strong caps it at 1,800 ms and 24,000 nodes.
+Smaller devices use the lighter budget. The server validates the resulting
+proposal independently.
 
 An isolated headless Edge 155.0.4283.45 run on the laptop described above tested
 one starting position in each of the four modes using the actual built Worker.
@@ -166,3 +167,62 @@ has too many unfinished games to rank close strengths. This is a sanity check,
 not an Elo estimate or a comparison with a mature chess engine. Longer games,
 independent chance trials and physical-device measurements remain necessary
 before publishing stronger performance or playing-strength claims.
+
+## Chaos tactical correction, 2026-10-14
+
+The released Chaos search could spend its whole turn evaluating the first
+capture, leaving no completed comparison with safer moves. It also mixed rare
+terminal wins with much smaller material scores, making some losing queen
+sacrifices look attractive. Root moves now receive an immediate legal exchange
+comparison before deeper search. Chance outcomes use bounded terminal and
+heuristic utilities on the same scale, with comparable samples across candidate
+moves. These utilities are heuristics, not calibrated win probabilities.
+
+Two reproduced queen-for-defended-knight positions and four additional tactical
+positions were checked at both 700 ms Balanced and 1,800 ms Strong. The revised
+bot avoided both reproduced traps and reduced exact-outcome exchange exposure
+in seven of twelve profile/position pairs; five were unchanged and none were
+worse. Representative Chaos positions completed depth 1 with Balanced and
+depth 2 with Strong, compared with the earlier depth-0 fallback. Depth and
+quality still vary with the position and available device resources.
+
+A separate eight-game paired-color, seeded Chaos pilot used identical
+80 ms/2,000-node limits and a 64-ply cutoff for both versions. The revised bot
+won seven games, lost none and left one unfinished. This small comparison with
+the earlier bot is not an Elo estimate or evidence of strength against a mature
+chess engine. Tactical regressions are part of the ordinary unit suite.
+
+The emergency fallback also considers guarded captures and hanging pieces. In
+75 local Node samples, including crowded positions with 98 and 130 legal moves,
+all proposals were legal and the longest fallback took 25.7 ms. Its 25 ms target
+is not a strict bound: sorting and the final exchange calculation cannot be
+preempted. These Node timings do not establish browser or physical-phone latency.
+Normal search remains in a cancellable Worker with the existing compute budgets.
+
+## Corrected Worker and presentation checks, 2026-10-15
+
+The corrected production Worker is 160,080 bytes before compression and 46,640
+bytes gzip. An isolated headless Edge 155.0.4283.45 run on the same laptop used
+the actual built asset for four mode openings and both reproduced Chaos queen
+traps. All six proposals were legal and both traps were avoided. Strong search
+took 1,800.4–1,802.6 ms; dispatch-to-result time was 1,822.9–1,836.9 ms. The
+observer recorded no main-thread long tasks, but one job had a 100 ms frame gap.
+This isolated harness does not measure end-to-end application input latency.
+
+Three jobs at a 390 px viewport, with page CPU throttling set to 4× and a 700 ms
+search budget, returned legal proposals in 723.2–735.2 ms including dispatch.
+These included avoiding the pawn-defended-knight queen trap. This is browser
+emulation rather than a physical-phone measurement. Across 276 heap samples
+at 40 ms intervals, the observed maxima were 9.33 MiB used and 21.25 MiB
+allocated; short peaks may be missed. The exposed-king capture was selected,
+and a terminated search delivered no result during the next 110 ms.
+
+Real two-player browser regressions cover desktop and 320 px layouts with
+enlarged text and maximum-length display names. They require at most 1 px of
+board, scroll and status-height drift during both players' turns. They also
+verify that a piece finishes moving before the cat enters, gifts/thefts remain
+staged until the paw action, and hidden/reduced-motion turns do not replay a
+backlog. The normal piece slide is 420 ms, followed by a 100 ms gap and a
+2,200 ms cat visit. Bot search runs during the visit; a completed proposal waits
+for it to finish. Human input and command acknowledgements are not held for
+the animation.

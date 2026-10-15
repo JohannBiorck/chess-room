@@ -7,6 +7,13 @@ import {
   type MoveInput,
   type PublicGame,
 } from "@chess-room/contracts";
+import {
+  completeSearchMove,
+  createSearchPosition,
+  prepareSearchMove,
+  searchExchangeGain,
+} from "@chess-room/game-core/search";
+import type { Square } from "chess.js";
 
 const STORAGE_KEY = "cat-chess.pending-bot-command";
 export interface PendingBotCommand {
@@ -96,12 +103,57 @@ export function validateBotPosition(view: BotPositionView, game: PublicGame): vo
 /** Small emergency fallback: legality is supplied by the authoritative snapshot. */
 export function fallbackBotMove(game: PublicGame): MoveInput {
   const values: Record<string, number> = { p: 100, n: 320, b: 335, r: 500, q: 900, k: 100000 };
-  const score = (move: MoveInput) =>
-    (values[game.position.board.find((piece) => piece.square === move.to)?.type ?? ""] ?? 0) +
-    (move.promotion ? (values[move.promotion] ?? 0) : 0);
-  const moves = [...game.position.legalMoves].sort(
+  const kingCapture = game.position.legalMoves.find(
+    (move) => game.position.board.find((piece) => piece.square === move.to)?.type === "k",
+  );
+  if (kingCapture) return kingCapture;
+  const deadline = performance.now() + 25;
+  const position = createSearchPosition({
+    fen: game.position.fen,
+    rulesetId: game.rulesetId,
+    rulesVersion: game.rulesVersion,
+    plies: game.position.moves.length,
+    checks: game.position.checks,
+    ...(game.catchess ? { catchess: game.catchess } : {}),
+    repetitions: [],
+  });
+  const enemy = position.chess.turn() === "w" ? "b" : "w";
+  const priority = (move: MoveInput) => {
+    const piece = position.chess.get(move.from as Square);
+    const victim = position.chess.get(move.to as Square);
+    return (
+      (victim ? (values[victim.type] ?? 0) : 0) +
+      (move.promotion ? (values[move.promotion] ?? 0) - 100 : 0) +
+      (piece && position.chess.isAttacked(move.from as Square, enemy)
+        ? (values[piece.type] ?? 0)
+        : 0) -
+      (piece && position.chess.isAttacked(move.to as Square, enemy) ? (values[piece.type] ?? 0) : 0)
+    );
+  };
+  const candidates = [...game.position.legalMoves].sort(
+    (a, b) => priority(b) - priority(a) || `${a.from}${a.to}`.localeCompare(`${b.from}${b.to}`),
+  );
+  const scores = new Map<MoveInput, number>();
+  // This exceptional path runs on the UI thread. Favor escapes/captures first
+  // and stop after a short deadline instead of searching a whole crowded board.
+  for (const move of candidates.slice(0, 64)) {
+    if (scores.size > 0 && performance.now() >= deadline) break;
+    const prepared = prepareSearchMove(position, move);
+    const after = completeSearchMove(prepared, { action: "none" }).position;
+    let exposed = 0;
+    for (const piece of after.chess.board().flat())
+      if (piece && piece.color !== after.chess.turn())
+        exposed = Math.max(exposed, searchExchangeGain(after, piece.square));
+    scores.set(
+      move,
+      (values[prepared.move.captured ?? ""] ?? 0) +
+        (move.promotion ? (values[move.promotion] ?? 0) - 100 : 0) -
+        exposed,
+    );
+  }
+  const moves = [...scores.keys()].sort(
     (a, b) =>
-      score(b) - score(a) ||
+      (scores.get(b) ?? 0) - (scores.get(a) ?? 0) ||
       `${a.from}${a.to}${a.promotion ?? ""}`.localeCompare(`${b.from}${b.to}${b.promotion ?? ""}`),
   );
   const move = moves[0];

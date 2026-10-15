@@ -5,9 +5,9 @@ import { catSquarePosition } from "./catPresentation";
 import { Piece } from "./Piece";
 import type { MoveTransition } from "./presentationEvents";
 import { usePageVisibility, useReducedMotion } from "./presentationPreferences";
+import { MOVE_ANIMATION_MS } from "./presentationTiming";
 
 export type BoardMovement = { id: string; transition: MoveTransition; createdAt: number };
-export const MOVE_ANIMATION_MS = 180;
 
 export function useMoveAnimation(movement: BoardMovement | null, layoutKey: string) {
   const reduced = useReducedMotion();
@@ -49,7 +49,12 @@ export function MoveAnimation({
   orientation: Color;
 }) {
   return (
-    <div className="move-layer" aria-hidden="true" data-move-animation={movement.id}>
+    <div
+      className="move-layer"
+      aria-hidden="true"
+      data-move-animation={movement.id}
+      style={{ "--move-duration": `${MOVE_ANIMATION_MS}ms` } as CSSProperties}
+    >
       {movement.transition.captured.map((piece) => {
         const point = catSquarePosition(piece.square, orientation);
         return (

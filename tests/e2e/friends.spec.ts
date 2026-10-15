@@ -464,7 +464,9 @@ test("two independent friends complete a keyboard-only checkmate, resume, and ag
     await keyboardMove(players.host, "g2", "g4");
     await keyboardMove(players.friend, "d8", "h4");
     await expect(players.host.getByRole("heading", { name: "Sam wins" })).toBeVisible();
-    await expect(players.friend.getByText("Checkmate", { exact: true })).toBeVisible();
+    await expect(
+      players.friend.getByRole("paragraph").filter({ hasText: /^Checkmate$/ }),
+    ).toBeVisible();
     await expect(players.host.getByRole("cell", { name: "Qh4#", exact: true })).toBeVisible();
     await players.host.getByRole("button", { name: "Lobby", exact: true }).click();
     await players.host.getByRole("button", { name: "Return to previous room" }).click();
@@ -568,7 +570,9 @@ test("keyboard moves, mobile layout, draw offers, and offline recovery converge"
     await players.host.getByRole("button", { name: "Offer draw" }).click();
     await players.friend.getByRole("button", { name: "Accept draw", exact: true }).click();
     await expect(players.host.getByRole("heading", { name: "Game drawn" })).toBeVisible();
-    await expect(players.friend.getByText("Draw by agreement", { exact: true })).toBeVisible();
+    await expect(
+      players.friend.getByRole("paragraph").filter({ hasText: /^Draw by agreement$/ }),
+    ).toBeVisible();
   } finally {
     await closePlayers(players);
   }
@@ -710,7 +714,9 @@ test("three-check mode persists its rules and check counters after reconnect", a
     await move(players.friend, "f7", "f6");
     await move(players.host, "d1", "h5");
     await expect(
-      players.friend.getByText("Black is in check. Protect the king.", { exact: true }),
+      players.friend
+        .getByRole("paragraph")
+        .filter({ hasText: /^Black is in check\. Protect the king\.$/ }),
     ).toBeVisible();
     await expect(players.host.getByRole("group", { name: "Checks delivered" })).toContainText(
       "1 / 3",
@@ -1749,6 +1755,9 @@ test("Chaos Cat changes real pieces and both friends see each visit once across 
     ] as const) {
       await players[actor].bringToFront();
       await move(players[actor], from, to);
+      await expect
+        .poll(async () => (await readGame(players[actor])).game.position.moves.length)
+        .toBe(ply);
       const next = (await readGame(players[actor])).game;
       const effect = next.position.catEffects?.[ply - 1];
       expect(next.rulesetId).toBe("chaos-cat");
@@ -1859,9 +1868,13 @@ test("a Chaos Cat rook theft exposes the king and a real opponent capture wins",
       { square: "a8", type: "k", color: "black" },
     ]);
     expect(finished.position.legalMoves).toEqual([]);
-    await expect(players.host.getByText(/King captured/)).toBeVisible();
+    await expect(
+      players.host.getByRole("paragraph").filter({ hasText: /^King captured$/ }),
+    ).toBeVisible();
     await players.host.reload();
-    await expect(players.host.getByText(/King captured/)).toBeVisible();
+    await expect(
+      players.host.getByRole("paragraph").filter({ hasText: /^King captured$/ }),
+    ).toBeVisible();
     expect((await readGame(players.host)).game.outcome).toEqual(finished.outcome);
   } finally {
     await closePlayers(players);

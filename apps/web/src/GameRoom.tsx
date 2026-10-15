@@ -8,7 +8,7 @@ import {
   RULESETS,
   TIME_CONTROLS,
 } from "@chess-room/contracts";
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { invitationUrl } from "./api";
 import { Board } from "./Board";
@@ -22,6 +22,7 @@ import type { PendingMove } from "./movePreview";
 import { Piece, pieceNames } from "./Piece";
 import { PresentationSettings } from "./PresentationSettings";
 import { movementId, moveTransition, type PresentationEvent } from "./presentationEvents";
+import { catVisitStartsAt } from "./presentationTiming";
 import type { Invitation } from "./useChessRoom";
 import { useGamePresentation } from "./useGamePresentation";
 
@@ -44,6 +45,20 @@ const reasonLabels: Record<GameOutcome["reason"], string> = {
 };
 
 const NO_PRESENTATION_EVENTS: PresentationEvent[] = [];
+const STATUS_GUIDANCE = [
+  "Your piece has moved. Waiting for confirmation.",
+  "White is in check. Protect the king.",
+  "Black is in check. Protect the king.",
+  "Select one of your pieces to see its legal moves.",
+  "Take a moment. Your opponent is thinking.",
+  "Take a moment. Your friend is thinking.",
+  "Take a moment. Cat Bot is thinking.",
+];
+const CHAOS_GUIDANCE = [
+  "Both kings are exposed. Protect your own, or capture your opponent’s king to win.",
+  "White’s king is exposed and can be captured. Watch the board carefully.",
+  "Black’s king is exposed and can be captured. Watch the board carefully.",
+];
 export type BotThinkingState = {
   status: "loading" | "thinking" | "paused" | "error";
   message?: string;
@@ -55,6 +70,7 @@ type GameRoomProps = {
   pendingMove: PendingMove | null;
   presentationEvents?: PresentationEvent[];
   botThinking?: BotThinkingState | null;
+  botController?: ReactNode;
   guestSession?: boolean;
   invitation: Invitation | null;
   receivedAt: number;
@@ -74,6 +90,7 @@ export function GameRoom({
   pendingMove,
   presentationEvents = NO_PRESENTATION_EVENTS,
   botThinking = null,
+  botController = null,
   guestSession = true,
   invitation,
   receivedAt,
@@ -87,10 +104,13 @@ export function GameRoom({
   onLobby,
 }: GameRoomProps) {
   const { game, seat } = view;
-  const presentation = useGamePresentation(game.id, presentationEvents);
-  const pendingStarted = useRef({ commandId: "", at: 0 });
+  const pendingStarted = useRef({ commandId: "", movementId: "", at: 0 });
   if (pendingMove && pendingStarted.current.commandId !== pendingMove.commandId)
-    pendingStarted.current = { commandId: pendingMove.commandId, at: performance.now() };
+    pendingStarted.current = {
+      commandId: pendingMove.commandId,
+      movementId: movementId(pendingMove.gameId, pendingMove.ply, pendingMove.move),
+      at: performance.now(),
+    };
   const [orientation, setOrientation] = useState<Color>(seat ?? "white");
   const [now, setNow] = useState(Date.now());
   const [promotion, setPromotion] = useState<MoveInput[] | null>(null);
@@ -163,7 +183,10 @@ export function GameRoom({
       ? {
           id: lastEvent.movementId,
           transition: lastEvent.transition,
-          createdAt: lastEvent.createdAt,
+          createdAt:
+            pendingStarted.current.movementId === lastEvent.movementId
+              ? pendingStarted.current.at
+              : lastEvent.createdAt,
         }
       : null;
   const pendingTransition = preview
@@ -177,6 +200,11 @@ export function GameRoom({
           createdAt: pendingStarted.current.at,
         }
       : confirmedMovement;
+  const catStartsAt =
+    lastEvent?.gameId === game.id && lastEvent.kind === "move" && confirmedMovement
+      ? catVisitStartsAt(lastEvent.createdAt, confirmedMovement.createdAt)
+      : 0;
+  const presentation = useGamePresentation(game.id, presentationEvents, catStartsAt);
   const boardLastMove = preview?.move ?? lastMove;
   const effectsByPly = new Map(
     (game.position.catEffects ?? []).map((effect) => [effect.ply, effect]),
@@ -194,6 +222,20 @@ export function GameRoom({
         : yourTurn
           ? "Your move"
           : `${game.players[game.position.turn]?.displayName ?? "Your friend"}’s move`;
+  const statusHeadings = [
+    "Your move",
+    "Confirming your move…",
+    "Game drawn",
+    ...(["white", "black"] as const).flatMap((color) => [
+      `${game.players[color]?.displayName ?? color}’s move`,
+      `${game.players[color]?.displayName ?? color} wins`,
+    ]),
+  ];
+  const statusDescriptions = [
+    ...STATUS_GUIDANCE,
+    ...(chaos ? CHAOS_GUIDANCE : []),
+    ...Object.values(reasonLabels),
+  ];
 
   function move(candidates: MoveInput[]) {
     if (candidates.some((candidate) => candidate.promotion !== undefined)) setPromotion(candidates);
@@ -339,6 +381,7 @@ export function GameRoom({
             busy={busy}
             revision={game.revision}
             movement={movement}
+            catStartsAt={catStartsAt}
             {...(boardLastMove ? { lastMove: boardLastMove } : {})}
             onMove={move}
           />
@@ -356,7 +399,7 @@ export function GameRoom({
         </section>
         <aside className="match-panel" aria-label="Game information">
           <section
-            className={`game-status${finished ? " game-status--finished" : ""}${presentation.resultEmphasis ? " game-status--result-arrival" : ""}`}
+            className={`game-status${active || finished ? " game-status--playing" : ""}${finished ? " game-status--finished" : ""}${presentation.resultEmphasis ? " game-status--result-arrival" : ""}`}
             aria-labelledby="status-heading"
           >
             <p className="eyebrow">
@@ -368,9 +411,22 @@ export function GameRoom({
                     ? "SENDING YOUR COMMAND"
                     : "AT THE BOARD"}
             </p>
-            <h2 id="status-heading" aria-live="polite" aria-atomic="true">
-              {status}
-            </h2>
+            <div className="status-heading-frame">
+              <h2
+                className="status-heading-visible"
+                id="status-heading"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                {status}
+              </h2>
+              {(active || finished) &&
+                [...new Set(statusHeadings)].map((heading) => (
+                  <span className="status-text-reserve" aria-hidden="true" key={heading}>
+                    {heading}
+                  </span>
+                ))}
+            </div>
             {botThinking && active && (
               <div
                 className={`bot-thinking bot-thinking--${botThinking.status}${presentation.reduced || !presentation.visible ? " bot-thinking--still" : ""}`}
@@ -391,33 +447,41 @@ export function GameRoom({
                 </span>
               </div>
             )}
-            {finished && game.outcome ? (
-              <p>{reasonLabels[game.outcome.reason]}</p>
-            ) : game.phase === "waiting" ? (
-              <p>
-                {openRoom
-                  ? "Your room is listed in the open lobby. Anyone visiting the site can join. The game starts when the other seat is taken."
-                  : "Send your invitation. The game starts as soon as the other seat is taken."}
-              </p>
-            ) : (
-              <p>
-                {preview
-                  ? "Your piece has moved. Waiting for confirmation."
-                  : chaos && threatenedKings.length > 0
-                    ? threatenedKings.length === 2
-                      ? "Both kings are exposed. Protect your own, or capture your opponent’s king to win."
-                      : `${threatenedKings[0] === "white" ? "White" : "Black"}’s king is exposed and can be captured. Watch the board carefully.`
-                    : game.position.inCheck
-                      ? `${game.position.turn === "white" ? "White" : "Black"} is in check. Protect the king.`
-                      : yourTurn
-                        ? "Select one of your pieces to see its legal moves."
-                        : openRoom
-                          ? "Take a moment. Your opponent is thinking."
-                          : game.bot
-                            ? "Take a moment. Cat Bot is thinking."
-                            : "Take a moment. Your friend is thinking."}
-              </p>
-            )}
+            <div className="status-description-frame">
+              {finished && game.outcome ? (
+                <p>{reasonLabels[game.outcome.reason]}</p>
+              ) : game.phase === "waiting" ? (
+                <p>
+                  {openRoom
+                    ? "Your room is listed in the open lobby. Anyone visiting the site can join. The game starts when the other seat is taken."
+                    : "Send your invitation. The game starts as soon as the other seat is taken."}
+                </p>
+              ) : (
+                <p>
+                  {preview
+                    ? "Your piece has moved. Waiting for confirmation."
+                    : chaos && threatenedKings.length > 0
+                      ? threatenedKings.length === 2
+                        ? "Both kings are exposed. Protect your own, or capture your opponent’s king to win."
+                        : `${threatenedKings[0] === "white" ? "White" : "Black"}’s king is exposed and can be captured. Watch the board carefully.`
+                      : game.position.inCheck
+                        ? `${game.position.turn === "white" ? "White" : "Black"} is in check. Protect the king.`
+                        : yourTurn
+                          ? "Select one of your pieces to see its legal moves."
+                          : openRoom
+                            ? "Take a moment. Your opponent is thinking."
+                            : game.bot
+                              ? "Take a moment. Cat Bot is thinking."
+                              : "Take a moment. Your friend is thinking."}
+                </p>
+              )}
+              {(active || finished) &&
+                [...new Set(statusDescriptions)].map((description) => (
+                  <p className="status-text-reserve" aria-hidden="true" key={description}>
+                    {description}
+                  </p>
+                ))}
+            </div>
             {game.phase === "waiting" && openRoom && (
               <p className="room-expiry">
                 If nobody joins, this room closes automatically 1 hour after creation.
@@ -434,6 +498,7 @@ export function GameRoom({
                 </span>
               </fieldset>
             )}
+            {game.bot && <div className="bot-status-slot">{botController}</div>}
           </section>
           {game.catchess && (
             <fieldset className="cat-match-settings">

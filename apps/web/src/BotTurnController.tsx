@@ -20,13 +20,35 @@ import {
   validateBotPosition,
 } from "./bot/coordinator";
 import { searchInWorker } from "./bot/workerClient";
+import type { PresentationEvent } from "./presentationEvents";
+import { useReducedMotion } from "./presentationPreferences";
+import { botPresentationEndsAt } from "./presentationTiming";
+
+async function waitForPresentation(until: number, signal: AbortSignal) {
+  const delay = until - performance.now();
+  if (delay <= 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const aborted = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("The cat turn was cancelled.", "AbortError"));
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", aborted);
+      resolve();
+    }, delay);
+    signal.addEventListener("abort", aborted, { once: true });
+    if (signal.aborted) aborted();
+  });
+}
 
 export function BotTurnController({
   game,
+  presentationEvents,
   onConfirmed,
   onRefresh,
 }: {
   game: PublicGame;
+  presentationEvents: PresentationEvent[];
   onConfirmed: (view: GameView) => void;
   onRefresh: () => void;
 }) {
@@ -34,7 +56,10 @@ export function BotTurnController({
   const attemptRef = useRef(attempt);
   attemptRef.current = attempt;
   const [visible, setVisible] = useState(!document.hidden);
-  const [status, setStatus] = useState<"loading" | "thinking" | "saving" | "idle">("idle");
+  const reduced = useReducedMotion();
+  const [status, setStatus] = useState<"loading" | "thinking" | "waiting" | "saving" | "idle">(
+    "idle",
+  );
   const [failure, setFailure] = useState<string | null>(null);
   const [fallback, setFallback] = useState(false);
   const pending = useRef<PendingBotCommand | null>(readPendingBotCommand());
@@ -42,16 +67,23 @@ export function BotTurnController({
   callbacks.current = { onConfirmed, onRefresh };
   const latest = useRef(game);
   latest.current = game;
+  const presentation = useRef(presentationEvents);
+  presentation.current = presentationEvents;
+  const cancelledVisit = useRef<string | null>(null);
   const turnKey = game.bot
     ? `${game.id}:${game.revision}:${game.bot.requestId}:${game.phase}:${game.position.turn}`
     : "";
   useEffect(() => {
-    const changed = () => setVisible(!document.hidden);
+    const changed = () => {
+      if (document.hidden) cancelledVisit.current = presentation.current.at(-1)?.id ?? null;
+      setVisible(!document.hidden);
+    };
     document.addEventListener("visibilitychange", changed);
     return () => document.removeEventListener("visibilitychange", changed);
   }, []);
   useEffect(() => {
     const game = latest.current;
+    if (reduced) cancelledVisit.current = presentation.current.at(-1)?.id ?? null;
     if (!turnKey || !isBotTurn(game) || !visible) {
       setStatus("idle");
       setFailure(null);
@@ -60,16 +92,17 @@ export function BotTurnController({
     const abort = new AbortController();
     const current = () =>
       !abort.signal.aborted &&
+      !document.hidden &&
       attemptRef.current === attempt &&
       latest.current.id === game.id &&
       latest.current.revision === game.revision &&
       latest.current.bot?.requestId === game.bot?.requestId;
     setFailure(null);
-    setFallback(false);
     const run = async () => {
       let command: BotCommand | null = reusableBotCommand(pending.current, game);
       try {
         if (!command) {
+          setFallback(false);
           setStatus("loading");
           const position = botPositionViewSchema.parse(
             await request(`/api/games/${game.id}/bot-position`),
@@ -99,6 +132,18 @@ export function BotTurnController({
           savePendingBotCommand(pending.current);
         }
         if (!current()) return;
+        const event = presentation.current.at(-1);
+        const until =
+          event?.gameId === game.id &&
+          event.ply === game.position.moves.length &&
+          event.id !== cancelledVisit.current
+            ? botPresentationEndsAt(event, reduced)
+            : 0;
+        if (until > performance.now()) {
+          setStatus("waiting");
+          await waitForPresentation(until, abort.signal);
+          if (!current()) return;
+        }
         setStatus("saving");
         const response = gameViewSchema.parse(
           await request(`/api/games/${game.id}/bot-command`, command),
@@ -132,11 +177,11 @@ export function BotTurnController({
     };
     void run();
     return () => abort.abort();
-  }, [turnKey, visible, attempt]);
+  }, [turnKey, visible, attempt, reduced]);
   if (!game.bot) return null;
   if (failure)
     return (
-      <aside className="notice" aria-label="Cat bot status">
+      <aside className="bot-turn-status" aria-label="Cat bot status">
         <p role="alert">{failure}</p>
         <button type="button" onClick={() => setAttempt((value) => value + 1)}>
           Retry cat turn
@@ -146,18 +191,23 @@ export function BotTurnController({
         </button>
       </aside>
     );
-  if (!isBotTurn(game)) return null;
   return (
-    <p className="notice" role="status">
-      {!visible
-        ? "Cat Bot is paused until this tab returns."
-        : status === "loading"
-          ? "Cat Bot is getting ready…"
-          : status === "thinking"
-            ? "Cat Bot is thinking…"
-            : status === "saving"
-              ? "Confirming the cat’s move…"
-              : "Cat Bot is ready."}
+    <p className="bot-turn-status" role="status">
+      {!isBotTurn(game)
+        ? game.phase === "finished"
+          ? "Cat Bot is ready for another game."
+          : "Cat Bot is waiting for your move."
+        : !visible
+          ? "Cat Bot is paused until this tab returns."
+          : status === "loading"
+            ? "Cat Bot is getting ready…"
+            : status === "thinking"
+              ? "Cat Bot is thinking…"
+              : status === "waiting"
+                ? "Letting the cat finish its visit…"
+                : status === "saving"
+                  ? "Confirming the cat’s move…"
+                  : "Cat Bot is ready."}
       {fallback && " A lighter fallback was used on this device."}
     </p>
   );

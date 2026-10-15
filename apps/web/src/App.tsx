@@ -135,35 +135,36 @@ export function App() {
             <p role="status">Connecting to your player session.</p>
           </main>
         ) : room.view ? (
-          <>
-            {room.view.game.bot && (
-              <BotTurnController
-                game={room.view.game}
-                onConfirmed={room.confirmBotView}
-                onRefresh={() => {
-                  void room.reconnect();
-                }}
-              />
-            )}
-            <GameRoom
-              key={room.view.game.id}
-              view={room.view}
-              liveCatEffects={room.liveCatEffects}
-              presentationEvents={room.presentationEvents}
-              guestSession={!accountSignedIn}
-              pendingMove={room.pendingMove}
-              invitation={room.invitation}
-              receivedAt={room.receivedAt}
-              busy={room.busy}
-              commandError={room.error}
-              connection={room.connection}
-              onCommand={room.command}
-              onReconnect={room.reconnect}
-              onInvitation={room.renewInvitation}
-              onRematch={room.openRematch}
-              onLobby={room.lobby}
-            />
-          </>
+          <GameRoom
+            key={room.view.game.id}
+            view={room.view}
+            liveCatEffects={room.liveCatEffects}
+            presentationEvents={room.presentationEvents}
+            botController={
+              room.view.game.bot ? (
+                <BotTurnController
+                  game={room.view.game}
+                  presentationEvents={room.presentationEvents}
+                  onConfirmed={room.confirmBotView}
+                  onRefresh={() => {
+                    void room.reconnect();
+                  }}
+                />
+              ) : null
+            }
+            guestSession={!accountSignedIn}
+            pendingMove={room.pendingMove}
+            invitation={room.invitation}
+            receivedAt={room.receivedAt}
+            busy={room.busy}
+            commandError={room.error}
+            connection={room.connection}
+            onCommand={room.command}
+            onReconnect={room.reconnect}
+            onInvitation={room.renewInvitation}
+            onRematch={room.openRematch}
+            onLobby={room.lobby}
+          />
         ) : (
           <Lobby
             session={room.session}

@@ -48,6 +48,7 @@ type BoardProps = {
   revision: number;
   lastMove?: MoveInput;
   movement?: BoardMovement | null;
+  catStartsAt?: number;
   onMove: (moves: MoveInput[]) => void;
 };
 
@@ -68,6 +69,7 @@ export function Board({
   revision,
   lastMove,
   movement = null,
+  catStartsAt = 0,
   onMove,
 }: BoardProps) {
   const [selected, setSelected] = useState<string | null>(null);
@@ -79,8 +81,8 @@ export function Board({
   const available = selected && canMove ? legalMoves.filter((move) => move.from === selected) : [];
   const layoutKey = `${gameId}:${orientation}:${layoutEpoch}`;
   const moveAnimation = useMoveAnimation(movement, layoutKey);
-  const visit = useCatVisit(gameId, catEffects, latestPly, layoutKey);
-  const effect = visit.active;
+  const visit = useCatVisit(gameId, catEffects, latestPly, layoutKey, catStartsAt);
+  const effect = visit.effect;
   const targetPiece = effect?.square ? bySquare.get(effect.square) : undefined;
   const depictsCurrentPosition = effect !== null && effect.ply === latestPly;
   const hideArrivingPiece =
@@ -124,7 +126,12 @@ export function Board({
 
   return (
     <>
-      <div className="board-stage">
+      <div
+        className="board-stage"
+        data-cat-sequence-phase={effect ? visit.phase : undefined}
+        data-cat-sequence-square={effect?.square}
+        data-cat-sequence-action={effect?.action}
+      >
         <table
           className="chessboard"
           aria-label="Chess board"
@@ -137,6 +144,17 @@ export function Board({
               <tr className="board-row" key={squares[row * 8]}>
                 {squares.slice(row * 8, row * 8 + 8).map((square, column) => {
                   const piece = bySquare.get(square);
+                  // Labels and legal actions always use the authoritative board;
+                  // a stolen piece stays visible until the cat reaches it.
+                  const departingPiece =
+                    depictsCurrentPosition &&
+                    effect?.action === "remove" &&
+                    visit.phase === "waiting" &&
+                    effect.square === square &&
+                    !piece
+                      ? { type: effect.piece ?? "p", color: effect.color }
+                      : null;
+                  const visualPiece = piece ?? departingPiece;
                   const index = row * 8 + column;
                   const rank = Number(square[1]);
                   const file = square.charCodeAt(0) - 97;
@@ -156,8 +174,8 @@ export function Board({
                   const travellingPiece = moveAnimation?.transition.moving.some(
                     (actor) =>
                       actor.to === square &&
-                      piece?.color === actor.piece.color &&
-                      piece?.type === (actor.promotion ?? actor.piece.type),
+                      visualPiece?.color === actor.piece.color &&
+                      visualPiece?.type === (actor.promotion ?? actor.piece.type),
                   );
                   const label = `${square}, ${piece ? `${piece.color} ${pieceNames[piece.type]}` : "empty"}${selected === square ? ", selected" : ""}${target ? ", legal destination" : ""}${checked ? (kingCapture ? ", king exposed" : ", in check") : ""}`;
                   return (
@@ -204,17 +222,19 @@ export function Board({
                             {square[0]}
                           </span>
                         )}
-                        {piece && (
+                        {visualPiece && (
                           <span
                             className={
                               pendingPiece
                                 ? "board-piece board-piece--cat-arrival"
                                 : travellingPiece
                                   ? "board-piece board-piece--travelling"
-                                  : "board-piece"
+                                  : departingPiece
+                                    ? "board-piece board-piece--cat-departure"
+                                    : "board-piece"
                             }
                           >
-                            <Piece type={piece.type} color={piece.color} />
+                            <Piece type={visualPiece.type} color={visualPiece.color} />
                           </span>
                         )}
                         {target && (
@@ -238,7 +258,7 @@ export function Board({
             orientation={orientation}
           />
         )}
-        {effect && (
+        {visit.active && effect && (
           <CatVisit
             key={`${gameId}:${effect.ply}`}
             effect={effect}

@@ -91,6 +91,54 @@ export function searchLegalMoves(position: SearchPosition): Move[] {
   return searchOutcome(position) ? [] : position.chess.moves({ verbose: true });
 }
 
+const exchangeValues = { p: 100, n: 320, b: 335, r: 500, q: 900, k: 100_000 } as const;
+
+/**
+ * A bounded capture-only estimate for ordering and horizon safety, not a rules
+ * transition. Each recapture uses a legal least-value attacker; pinned pieces
+ * and unsafe king captures cannot defend a piece. Future random cat visits are
+ * deliberately excluded: search weighs those visits at its actual chance nodes.
+ */
+export function searchExchangeGain(
+  position: Pick<SearchPosition, "chess" | "rulesetId">,
+  target: Square,
+  remaining = 8,
+): number {
+  const { chess, rulesetId } = position;
+  const victim = chess.get(target);
+  if (!victim || victim.color === chess.turn() || remaining <= 0) return 0;
+  if (victim.type === "k" && rulesetId !== "chaos-cat") return 0;
+  const color = chess.turn();
+  const enemy = color === "w" ? "b" : "w";
+  const attackers = chess.attackers(target, color).sort((left, right) => {
+    const a = chess.get(left);
+    const b = chess.get(right);
+    return (a ? exchangeValues[a.type] : Infinity) - (b ? exchangeValues[b.type] : Infinity);
+  });
+  for (const from of attackers) {
+    const attacker = chess.get(from);
+    if (!attacker) continue;
+    const candidate = derivedCatPosition(chess.fen({ forceEnpassantSquare: true }));
+    candidate.remove(from);
+    candidate.remove(target);
+    const promoted = attacker.type === "p" && (target[1] === "1" || target[1] === "8");
+    candidate.put({ color, type: promoted ? "q" : attacker.type }, target);
+    const king = candidate.findPiece({ color, type: "k" })[0];
+    if (!king || candidate.isAttacked(king, enemy)) continue;
+    if (victim.type === "k") return exchangeValues.k;
+    const fields = candidate.fen({ forceEnpassantSquare: true }).split(" ");
+    fields[1] = enemy;
+    fields[3] = "-";
+    const next = derivedCatPosition(fields.join(" "));
+    const gain = exchangeValues[victim.type] + (promoted ? exchangeValues.q - exchangeValues.p : 0);
+    return Math.max(
+      0,
+      gain - searchExchangeGain({ chess: next, rulesetId }, target, remaining - 1),
+    );
+  }
+  return 0;
+}
+
 export function prepareSearchMove(position: SearchPosition, input: MoveInput): PreparedSearchMove {
   const chess = derivedCatPosition(position.chess.fen({ forceEnpassantSquare: true }));
   const move = chess.move({

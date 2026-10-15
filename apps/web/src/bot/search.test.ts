@@ -9,6 +9,7 @@ import {
   createSearchPosition,
   prepareSearchMove,
   searchChanceChoices,
+  searchExchangeGain,
   searchOutcome,
 } from "@chess-room/game-core/search";
 import { describe, expect, it } from "vitest";
@@ -147,5 +148,109 @@ describe("bounded variant bot", () => {
     expect(result.exhausted).toBe(true);
     expect(result.nodes).toBeLessThan(10);
     expect(inspectEngine(createEngineState("chaos-cat")).legalMoves).toContainEqual(result.move);
+  });
+
+  for (const mode of ["standard", "catchess", "chaos-cat"] as const)
+    for (const profile of ["balanced", "strong"] as const) {
+      it(`${profile} ${mode} compares quiet alternatives before accepting a defended-knight queen sacrifice`, () => {
+        for (const fen of [
+          "4k3/8/8/4p3/5n1Q/8/8/4K3 w - - 0 1",
+          "r5k1/8/8/8/n7/8/8/Q5K1 w - - 0 1",
+        ]) {
+          const snapshot = getEngineSearchPosition(createEngineState(mode, fen));
+          const result = chooseBotMove(snapshot, { profile, maxNodes: 700, now: () => 0 });
+          const prepared = prepareSearchMove(createSearchPosition(snapshot), result.move);
+          expect(prepared.move.captured).not.toBe("n");
+          // Includes every real cat outcome, not just the search's samples. An
+          // occasional theft is unavoidable; a queen left for an easy recapture is not.
+          let queenLoss = 0;
+          for (const choice of searchChanceChoices(prepared)) {
+            const child = completeSearchMove(prepared, choice).position;
+            if (
+              !searchOutcome(child) &&
+              child.chess.get(prepared.move.to)?.type === "q" &&
+              searchExchangeGain(child, prepared.move.to) >= 600
+            )
+              queenLoss += choice.probability;
+          }
+          expect(queenLoss).toBeLessThan(0.2);
+          expect(result.nodes).toBeLessThanOrEqual(701);
+        }
+      });
+      it(`${profile} ${mode} moves a threatened queen quietly instead of trading it for a guarded bishop`, () => {
+        const state = createEngineState(mode, "6k1/8/8/8/3p4/2b5/8/Q5K1 w - - 0 1");
+        const result = chooseBotMove(getEngineSearchPosition(state), {
+          profile,
+          maxNodes: 700,
+          now: () => 0,
+        });
+        expect(result.move.from).toBe("a1");
+        expect(result.move.to).not.toBe("c3");
+        const prepared = prepareSearchMove(
+          createSearchPosition(getEngineSearchPosition(state)),
+          result.move,
+        );
+        const after = completeSearchMove(prepared, { action: "none" }).position;
+        expect(searchExchangeGain(after, prepared.move.to)).toBe(0);
+      });
+    }
+
+  it("does not prefer a rare Chaos mate lottery over preserving a queen", () => {
+    const state = createEngineState("chaos-cat", "r5k1/8/8/8/n7/8/8/Q5K1 w - - 0 1");
+    const snapshot = getEngineSearchPosition(state);
+    const position = createSearchPosition(snapshot);
+    const lottery = prepareSearchMove(position, { from: "a1", to: "g7" });
+    let winChance = 0;
+    let queenRecaptureChance = 0;
+    for (const choice of searchChanceChoices(lottery)) {
+      const child = completeSearchMove(lottery, choice).position;
+      if (searchOutcome(child)?.winner === "white") winChance += choice.probability;
+      if (
+        child.chess.get("g7")?.type === "q" &&
+        !searchOutcome(child) &&
+        searchExchangeGain(child, "g7") >= 600
+      )
+        queenRecaptureChance += choice.probability;
+    }
+    expect(winChance).toBeCloseTo(0.0291666667, 8);
+    expect(queenRecaptureChance).toBeGreaterThan(0.8);
+    const result = chooseBotMove(snapshot, { maxNodes: 2_000, now: () => 0 });
+    expect(result.move).not.toEqual({ from: "a1", to: "g7" });
+    expect(Math.abs(result.score)).toBeLessThanOrEqual(1_000);
+  });
+
+  it("still takes an unguarded Chaos queen instead of avoiding every capture", () => {
+    const state = createEngineState("chaos-cat", "6k1/8/8/4q3/8/5N2/8/6K1 w - - 0 1");
+    expect(
+      chooseBotMove(getEngineSearchPosition(state), { maxNodes: 700, now: () => 0 }).move,
+    ).toEqual({ from: "f3", to: "e5" });
+  });
+
+  it("keeps zero-chance Cat Chess on the full-width deterministic search path", () => {
+    const fen = "4k3/8/8/4p3/5n1Q/8/8/4K3 w - - 0 1";
+    const budget = { maxNodes: 700, maxDepth: 2, now: () => 0 };
+    const standard = chooseBotMove(
+      getEngineSearchPosition(createEngineState("standard", fen)),
+      budget,
+    );
+    const cat = chooseBotMove(
+      getEngineSearchPosition(createEngineState("catchess", fen, { white: 0, black: 0 })),
+      budget,
+    );
+    expect(cat.move).toEqual(standard.move);
+    expect(cat.score).toBe(standard.score);
+    expect(cat.depth).toBe(standard.depth);
+  });
+
+  it("keeps an extreme-budget fallback from moving its queen into an unsupported king attack", () => {
+    const snapshot = getEngineSearchPosition(
+      createEngineState("chaos-cat", "r5k1/8/8/8/n7/8/8/Q5K1 w - - 0 1"),
+    );
+    const result = chooseBotMove(snapshot, { maxNodes: 1, now: () => 0 });
+    const prepared = prepareSearchMove(createSearchPosition(snapshot), result.move);
+    const child = completeSearchMove(prepared, { action: "none" }).position;
+    expect(searchExchangeGain(child, prepared.move.to)).toBe(0);
+    expect(result.nodes).toBeLessThanOrEqual(2);
+    expect(result.exhausted).toBe(true);
   });
 });

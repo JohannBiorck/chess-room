@@ -843,6 +843,7 @@ fieldset legend {
 }
 .game-room {
   padding: 36px 0 60px;
+  overflow-anchor: none;
 }
 .closed-room {
   max-width: 620px;
@@ -1013,6 +1014,8 @@ fieldset legend {
   color: var(--muted);
 }
 .chessboard {
+  width: 100%;
+  aspect-ratio: 1;
   display: flex;
   flex-direction: column;
   border: 6px solid #d3ddc8;
@@ -1024,13 +1027,18 @@ fieldset legend {
 .chessboard tbody {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 .board-row {
   display: grid;
   grid-template-columns: repeat(8, minmax(0, 1fr));
+  flex: 1;
+  min-height: 0;
 }
 .board-row > td {
   min-width: 0;
+  min-height: 0;
   padding: 0;
 }
 .square {
@@ -1042,6 +1050,8 @@ fieldset legend {
   border: 0;
   border-radius: 0;
   width: 100%;
+  height: 100%;
+  min-height: 0;
   aspect-ratio: 1;
 }
 .square--light {
@@ -1156,7 +1166,7 @@ fieldset legend {
   margin-bottom: 10px;
   font-size: 9px;
 }
-.game-status h2 {
+.status-heading-frame {
   margin: 0;
   font-family: Georgia, serif;
   font-size: 27px;
@@ -1172,6 +1182,43 @@ fieldset legend {
 }
 .game-status--finished {
   background: #f0e8d6;
+}
+.status-heading-frame,
+.status-description-frame {
+  display: grid;
+  min-width: 0;
+}
+.status-heading-frame > *,
+.status-description-frame > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.status-heading-visible {
+  margin: 0;
+  font: inherit;
+  letter-spacing: inherit;
+}
+.status-text-reserve {
+  visibility: hidden;
+  pointer-events: none;
+}
+.bot-status-slot {
+  height: 116px;
+  margin-top: 12px;
+  border-top: 1px solid #d0dbc6;
+  overflow-y: auto;
+  overflow-anchor: none;
+}
+.game-status .bot-turn-status {
+  margin: 0;
+  padding: 12px 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.bot-turn-status button {
+  margin: 6px 6px 0 0;
 }
 .game-status .room-expiry {
   padding-top: 12px;
@@ -1262,6 +1309,7 @@ fieldset legend {
 .move-history {
   min-height: 150px;
   max-height: 290px;
+  height: 240px;
   overflow-y: auto;
   margin: 0 -10px 0 0;
   padding-right: 10px;
@@ -1686,7 +1734,7 @@ fieldset legend {
   .board-toolbar {
     font-size: 10px;
   }
-  .game-status h2 {
+  .game-status .status-heading-frame {
     font-size: 29px;
   }
   .site-footer {
@@ -2139,11 +2187,11 @@ fieldset legend {
   10% {
     opacity: 1;
   }
-  33% {
+  39% {
     transform: translate(-8%, -28%) scale(1.06) rotate(-3deg);
   }
-  41%,
-  66% {
+  44%,
+  73% {
     opacity: 1;
     transform: translate(0, 0) scale(1) rotate(0);
   }
@@ -2154,16 +2202,16 @@ fieldset legend {
 }
 @keyframes cat-paw {
   0%,
-  38%,
-  68%,
+  44%,
+  73%,
   100% {
     transform: rotate(0);
   }
-  46%,
-  54% {
+  48%,
+  56% {
     transform: rotate(-35deg);
   }
-  60% {
+  64% {
     transform: rotate(7deg);
   }
 }
@@ -2174,23 +2222,23 @@ fieldset legend {
     opacity: 0;
     transform: scale(0.4);
   }
-  45%,
-  65% {
+  48%,
+  73% {
     opacity: 0.8;
     transform: scale(1.08);
   }
 }
 @keyframes cat-add-piece {
   0%,
-  42% {
+  48% {
     opacity: 0;
     transform: scale(0.25) translateY(-20%);
   }
-  50% {
+  56% {
     opacity: 1;
     transform: scale(1.15);
   }
-  56%,
+  62%,
   100% {
     opacity: 1;
     transform: scale(1);
@@ -2198,15 +2246,15 @@ fieldset legend {
 }
 @keyframes cat-remove-piece {
   0%,
-  45% {
+  48% {
     opacity: 1;
     transform: scale(1);
   }
-  54% {
+  58% {
     opacity: 0.6;
     transform: scale(0.7) translateY(-15%);
   }
-  62%,
+  66%,
   100% {
     opacity: 0;
     transform: scale(0.2) translateY(-40%);
@@ -2214,17 +2262,17 @@ fieldset legend {
 }
 @keyframes cat-spark {
   0%,
-  43%,
-  70%,
+  47%,
+  78%,
   100% {
     opacity: 0;
     transform: scale(0.3);
   }
-  52% {
+  56% {
     opacity: 1;
     transform: scale(2.6);
   }
-  66% {
+  73% {
     opacity: 0;
     transform: scale(3.8);
   }
@@ -2337,7 +2385,7 @@ fieldset legend {
   animation: promotion-piece var(--move-duration) linear both;
 }
 .move-captured-piece {
-  animation: piece-captured 120ms ease-out both;
+  animation: piece-captured var(--move-duration, 420ms) ease-out both;
 }
 .move-layer .move-captured-piece > .piece {
   width: 88%;
@@ -2353,10 +2401,11 @@ fieldset legend {
   }
 }
 @keyframes piece-captured {
-  from {
+  0%,
+  65% {
     opacity: 1;
   }
-  to {
+  100% {
     opacity: 0;
   }
 }

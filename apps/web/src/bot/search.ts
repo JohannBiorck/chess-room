@@ -14,6 +14,7 @@ import {
   prepareSearchMove,
   type SearchPosition,
   searchChanceChoices,
+  searchExchangeGain,
   searchHistoryKey,
   searchLegalMoves,
   searchOutcome,
@@ -29,6 +30,7 @@ const VALUES: Readonly<Record<PieceSymbol, number>> = {
   k: 0,
 };
 const WIN = 100_000;
+const CHANCE_WIN = 1_000;
 const CACHE_LIMIT = 4_000;
 const ROOT_PREPARATION_LIMIT = 48;
 
@@ -60,7 +62,9 @@ interface Context {
   exactChance: boolean;
   fullWidth: boolean;
   quiescenceDepth: number;
+  stochastic: boolean;
   cache: Map<string, number>;
+  tacticalCache: Map<string, number>;
   rootPosition: SearchPosition | null;
   rootPreparations: Map<Move, PreparedSearchMove>;
   rootChoices: Map<Move, CatChanceChoice[]>;
@@ -185,21 +189,27 @@ function ordering(move: Move): number {
     (move.piece === "n" ? center * 12 : move.piece === "p" ? center * 6 : center * 2)
   );
 }
+function rootOrdering(position: SearchPosition, move: Move): number {
+  const enemy = move.color === "w" ? "b" : "w";
+  const loss =
+    move.captured !== "k" && position.chess.isAttacked(move.to, enemy)
+      ? Math.max(0, VALUES[move.piece] - (move.captured ? VALUES[move.captured] : 0)) * 12
+      : 0;
+  return ordering(move) - loss;
+}
 function orderedMoves(position: SearchPosition, context: Context, depth: number): Move[] {
   const moves = searchLegalMoves(position).sort(
     (a, b) => ordering(b) - ordering(a) || a.lan.localeCompare(b.lan),
   );
-  if (
-    context.fullWidth ||
-    position.rulesetId === "standard" ||
-    position.rulesetId === "three-check" ||
-    position.chess.inCheck()
-  )
-    return moves;
+  if (context.fullWidth || !context.stochastic || position.chess.inCheck()) return moves;
   // Chance nodes multiply branching. Keep tactical moves plus a bounded quiet beam.
   const limit = depth >= 2 ? 7 : 5;
   return moves.filter(
-    (move, index) => index < limit || move.captured === "k" || move.promotion !== undefined,
+    (move, index) =>
+      index < limit ||
+      move.captured !== undefined ||
+      move.promotion !== undefined ||
+      /[+#]/.test(move.san),
   );
 }
 function visit(context: Context): void {
@@ -211,7 +221,63 @@ function terminalScore(position: SearchPosition, context: Context): number | nul
   const result = searchOutcome(position);
   if (!result) return null;
   if (!result.winner) return 0;
-  return (result.winner === context.root ? 1 : -1) * (WIN - position.plies);
+  return (
+    (result.winner === context.root ? 1 : -1) *
+    (context.stochastic ? CHANCE_WIN : WIN - position.plies)
+  );
+}
+function utility(value: number, context: Context): number {
+  // Mate distance is useful in deterministic chess. At a chance node, mixing
+  // 100000 for a rare mate with centipawn material rewards desperate sacrifices.
+  // This bounded heuristic is a search utility, not a measured win probability.
+  return context.stochastic ? Math.tanh(value / 600) * CHANCE_WIN : value;
+}
+function tacticalEvaluation(position: SearchPosition, context: Context): number {
+  const key = `${position.chess.fen()}:${position.checks.white}:${position.checks.black}:${position.plies}`;
+  const cached = context.tacticalCache.get(key);
+  if (cached !== undefined) return cached;
+  let gain = 0;
+  for (const row of position.chess.board())
+    for (const piece of row) {
+      if (!piece || piece.color === position.chess.turn()) continue;
+      if (piece.type !== "k" || position.rulesetId === "chaos-cat")
+        gain = Math.max(gain, searchExchangeGain(position, piece.square));
+    }
+  const side = sideToMove(position) === context.root ? 1 : -1;
+  const value =
+    gain >= WIN
+      ? side * (context.stochastic ? CHANCE_WIN : WIN - position.plies - 1)
+      : utility(evaluatePosition(position, context.root) + side * gain, context);
+  if (context.tacticalCache.size < 1_000) context.tacticalCache.set(key, value);
+  return value;
+}
+function rootPreparation(position: SearchPosition, move: Move, context: Context) {
+  let prepared = context.rootPreparations.get(move);
+  if (!prepared) {
+    prepared = prepareSearchMove(position, moveInput(move));
+    if (context.rootPreparations.size < ROOT_PREPARATION_LIMIT)
+      context.rootPreparations.set(move, prepared);
+  }
+  return prepared;
+}
+function rootStaticValue(position: SearchPosition, move: Move, context: Context): number {
+  const prepared = rootPreparation(position, move, context);
+  let all = context.rootChoices.get(move);
+  if (!all) {
+    all = searchChanceChoices(prepared);
+    if (context.rootChoices.size < ROOT_PREPARATION_LIMIT) context.rootChoices.set(move, all);
+  }
+  const choices = context.exactChance
+    ? all
+    : sampleChanceChoices(all, 2, `${position.chess.fen()}:root`);
+  let value = 0;
+  for (const choice of choices) {
+    visit(context);
+    const child = completeSearchMove(prepared, choice).position;
+    value +=
+      choice.probability * (terminalScore(child, context) ?? tacticalEvaluation(child, context));
+  }
+  return value;
 }
 function expectation(
   position: SearchPosition,
@@ -227,7 +293,7 @@ function expectation(
     searchChanceChoices(prepared);
   const choices = context.exactChance
     ? all
-    : sampleChanceChoices(all, depth === 0 ? 2 : 1, `${position.chess.fen()}:${move.lan}`);
+    : sampleChanceChoices(all, depth === 0 ? 2 : 1, `${position.chess.fen()}:${depth}`);
   let value = 0;
   for (const choice of choices) {
     visit(context);
@@ -255,7 +321,7 @@ function decision(
   const originalBeta = beta;
   let best = maximizing ? -WIN : WIN;
   let pruned = false;
-  const deterministic = position.rulesetId === "standard" || position.rulesetId === "three-check";
+  const deterministic = !context.stochastic;
   for (const move of orderedMoves(position, context, depth)) {
     const value = deterministic
       ? deterministicValue(position, move, depth - 1, context, alpha, beta)
@@ -289,12 +355,12 @@ function quiescence(
 ): number {
   const terminal = terminalScore(position, context);
   if (terminal !== null) return terminal;
-  const standing = evaluatePosition(position, context.root);
-  if (remaining === 0) return standing;
+  if (remaining === 0) return tacticalEvaluation(position, context);
+  const standing = utility(evaluatePosition(position, context.root), context);
   const maximizing = sideToMove(position) === context.root;
   const inCheck = position.chess.inCheck();
   let best = inCheck ? (maximizing ? -WIN : WIN) : standing;
-  const deterministic = position.rulesetId === "standard" || position.rulesetId === "three-check";
+  const deterministic = !context.stochastic;
   if (deterministic && !inCheck) {
     if (maximizing) {
       if (best >= beta) return best;
@@ -312,7 +378,7 @@ function quiescence(
     const all = searchChanceChoices(prepared);
     const choices = context.exactChance
       ? all
-      : sampleChanceChoices(all, 1, `${position.chess.fen()}:${move.lan}:quiet`);
+      : sampleChanceChoices(all, 1, `${position.chess.fen()}:quiet`);
     let value = 0;
     for (const choice of choices) {
       visit(context);
@@ -358,6 +424,10 @@ export function chooseBotMove(
   const profile = BOT_PROFILES[options.profile ?? "strong"];
   const now = options.now ?? (() => performance.now());
   const started = now();
+  const stochastic =
+    snapshot.rulesetId === "chaos-cat" ||
+    (snapshot.rulesetId === "catchess" &&
+      (snapshot.catchess?.white !== 0 || snapshot.catchess?.black !== 0));
   const context: Context = {
     root: snapshot.fen.split(" ")[1] === "w" ? "white" : "black",
     deadline: started + Math.max(1, Math.min(options.thinkMs ?? profile.thinkMs, 3_000)),
@@ -366,22 +436,26 @@ export function chooseBotMove(
     now,
     exactChance: options.exactChance ?? false,
     fullWidth: options.fullWidth ?? false,
-    quiescenceDepth: Math.max(0, Math.min(options.quiescenceDepth ?? 2, 3)),
+    // Legal exchange analysis resolves the chance-search horizon without
+    // expanding another exponential tree of random recaptures at every leaf.
+    quiescenceDepth: Math.max(0, Math.min(options.quiescenceDepth ?? (stochastic ? 0 : 2), 3)),
+    stochastic,
     cache: new Map(),
+    tacticalCache: new Map(),
     rootPosition: null,
     rootPreparations: new Map(),
     rootChoices: new Map(),
   };
   const position = createSearchPosition(snapshot);
   const moves = searchLegalMoves(position).sort(
-    (a, b) => ordering(b) - ordering(a) || a.lan.localeCompare(b.lan),
+    (a, b) => rootOrdering(position, b) - rootOrdering(position, a) || a.lan.localeCompare(b.lan),
   );
   const first = moves[0];
   if (!first) throw new Error("The bot has no legal move in this position.");
   const immediateWin = moves.find((move) =>
     position.rulesetId === "chaos-cat"
       ? move.captured === "k"
-      : position.rulesetId === "standard" || position.rulesetId === "three-check"
+      : !context.stochastic
         ? move.san.endsWith("#") ||
           (position.rulesetId === "three-check" &&
             position.checks[context.root] >= 2 &&
@@ -392,57 +466,71 @@ export function chooseBotMove(
     return {
       algorithm: BOT_ALGORITHM,
       move: moveInput(immediateWin),
-      score: WIN - snapshot.plies - 1,
+      score: context.stochastic ? CHANCE_WIN : WIN - snapshot.plies - 1,
       depth: 1,
       nodes: 1,
       elapsedMs: Math.max(0, now() - started),
       exhausted: false,
     };
   let best = first;
-  let score = evaluatePosition(position, context.root);
+  let score = utility(evaluatePosition(position, context.root), context);
   let completedDepth = 0;
   let exhausted = false;
-  let rankings = moves.map((move) => ({ move, score: ordering(move) }));
+  let rankings = moves.map((move) => ({ move, score: rootOrdering(position, move) }));
   context.rootPosition = position;
-  if (position.rulesetId === "chaos-cat") {
-    for (const candidate of rankings) {
-      if (now() >= context.deadline || context.rootPreparations.size >= ROOT_PREPARATION_LIMIT)
-        break;
-      const prepared = prepareSearchMove(position, moveInput(candidate.move));
-      const choices = searchChanceChoices(prepared);
-      context.rootPreparations.set(candidate.move, prepared);
-      context.rootChoices.set(candidate.move, choices);
-      const exposureMass = choices
-        .filter((choice) => choice.kingExposure)
-        .reduce((sum, choice) => sum + choice.probability, 0);
-      candidate.score -= exposureMass * WIN;
+  // First compare every root move cheaply. Expensive chance/quiescence trees
+  // must not monopolize the turn before a safe quiet alternative is considered.
+  const coarse: typeof rankings = [];
+  try {
+    for (const { move } of rankings) {
+      visit(context);
+      const prepared = rootPreparation(position, move, context);
+      const child = completeSearchMove(prepared, { action: "none" }).position;
+      const value = terminalScore(child, context) ?? tacticalEvaluation(child, context);
+      coarse.push({ move, score: value });
     }
-    rankings.sort((a, b) => b.score - a.score);
-    best = rankings[0]?.move ?? best;
+  } catch (error) {
+    if (!(error instanceof BudgetReached)) throw error;
+    exhausted = true;
+  }
+  if (coarse.length) {
+    coarse.sort((a, b) => b.score - a.score);
+    rankings = coarse;
+    best = coarse[0]?.move ?? best;
+    score = coarse[0]?.score ?? score;
+  }
+  if (context.stochastic && !exhausted) {
+    const weighted: typeof rankings = [];
+    try {
+      for (const candidate of rankings)
+        weighted.push({
+          move: candidate.move,
+          score: rootStaticValue(position, candidate.move, context),
+        });
+      weighted.sort((a, b) => b.score - a.score);
+      rankings = weighted;
+      best = weighted[0]?.move ?? best;
+      score = weighted[0]?.score ?? score;
+      completedDepth = 1;
+    } catch (error) {
+      if (!(error instanceof BudgetReached)) throw error;
+      exhausted = true;
+    }
   }
   const maximumDepth = Math.max(1, Math.min(options.maxDepth ?? profile.maxDepth, 8));
-  for (let depth = 1; depth <= maximumDepth; depth += 1) {
+  for (let depth = context.stochastic ? 2 : 1; depth <= maximumDepth; depth += 1) {
+    if (exhausted) break;
     const next: { move: Move; score: number }[] = [];
     let rootAlpha = -WIN;
     const candidates =
-      depth === 1 ||
-      context.fullWidth ||
-      position.rulesetId === "standard" ||
-      position.rulesetId === "three-check"
-        ? rankings
-        : rankings.slice(0, 8);
+      depth === 1 || context.fullWidth || !context.stochastic ? rankings : rankings.slice(0, 8);
     try {
       for (const candidate of candidates) {
-        const value =
-          position.rulesetId === "standard" || position.rulesetId === "three-check"
-            ? deterministicValue(position, candidate.move, depth - 1, context, rootAlpha, WIN)
-            : expectation(position, candidate.move, depth - 1, context);
+        const value = !context.stochastic
+          ? deterministicValue(position, candidate.move, depth - 1, context, rootAlpha, WIN)
+          : expectation(position, candidate.move, depth - 1, context);
         next.push({ move: candidate.move, score: value });
         rootAlpha = Math.max(rootAlpha, value);
-        if (depth === 1 && (next.length === 1 || value > score)) {
-          best = candidate.move;
-          score = value;
-        }
       }
       next.sort((a, b) => b.score - a.score);
       const winner = next[0];
@@ -452,7 +540,8 @@ export function chooseBotMove(
         completedDepth = depth;
         rankings = next;
       }
-      if (score >= WIN - snapshot.plies - maximumDepth - 1) break;
+      if (score >= (context.stochastic ? CHANCE_WIN : WIN - snapshot.plies - maximumDepth - 1))
+        break;
     } catch (error) {
       if (!(error instanceof BudgetReached)) throw error;
       exhausted = true;

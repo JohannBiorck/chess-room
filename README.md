@@ -28,6 +28,8 @@ Choose **Play the cat** in the lobby for a private, untimed game in any of the
 four modes. Balanced and Strong profiles bound thinking time on your device;
 smaller devices use a lighter budget. Cat Bot uses variant-aware search in a
 lazy browser Worker, with shared legal transitions and weighted cat outcomes.
+It compares immediate exchanges before deeper search, including defended captures
+and hanging pieces. Cat visits finish before the bot makes its next move.
 The server still validates every move and generates all real cat randomness.
 No remote engine, paid API or server search process is used.
 
@@ -39,7 +41,8 @@ is claimed.
 
 ## Sound and movement
 
-Chess moves, captures, castling, promotions and cat actions have short animations.
+Chess moves, captures, castling and promotions animate before the following cat
+visit. Gifts and thefts appear when the cat reaches the square.
 Sound starts off; enable original move and cat cues under **Sound & motion**.
 Volume and motion can be adjusted separately, and device reduced-motion settings
 are respected. Refresh/reconnect does not play missed sound effects. Account

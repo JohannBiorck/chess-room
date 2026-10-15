@@ -5,22 +5,20 @@ import { Cat } from "./Cat";
 import { catEffectAnnouncement, catSquarePosition } from "./catPresentation";
 import { Piece } from "./Piece";
 import { usePageVisibility, useReducedMotion } from "./presentationPreferences";
-
-export const CAT_VISIT_MS = 1200;
-export const CAT_PAW_MS = 560;
+import { CAT_EXIT_MS, CAT_PAW_MS, CAT_VISIT_MS } from "./presentationTiming";
 
 export function useCatVisit(
   gameId: string,
   effects: CatEffect[],
   latestPly?: number,
   layoutKey = "",
+  startsAt = 0,
 ) {
   const seen = useRef(new Set<number>());
-  const queue = useRef<CatEffect[]>([]);
   const currentGame = useRef(gameId);
   const currentLayout = useRef(layoutKey);
-  const [active, setActive] = useState<CatEffect | null>(null);
-  const [phase, setPhase] = useState<"arrive" | "paw" | "exit">("arrive");
+  const [scheduled, setScheduled] = useState<{ effect: CatEffect; startsAt: number } | null>(null);
+  const [phase, setPhase] = useState<"waiting" | "arrive" | "paw" | "exit">("waiting");
   const [announcement, setAnnouncement] = useState("");
   const reduced = useReducedMotion();
   const visible = usePageVisibility();
@@ -29,8 +27,7 @@ export function useCatVisit(
     if (currentGame.current !== gameId) {
       currentGame.current = gameId;
       seen.current.clear();
-      queue.current = [];
-      setActive(null);
+      setScheduled(null);
     }
     const fresh = effects.filter((effect) => !seen.current.has(effect.ply));
     for (const effect of fresh) seen.current.add(effect.ply);
@@ -39,38 +36,45 @@ export function useCatVisit(
     const layoutChanged = currentLayout.current !== layoutKey;
     currentLayout.current = layoutKey;
     if (reduced || !visible || effects.length === 0 || layoutChanged) {
-      queue.current = [];
-      setActive(null);
+      setScheduled(null);
       return;
     }
-    // A short bounded queue prevents old effects from obscuring a rapidly advancing game.
-    queue.current = [
-      ...queue.current,
-      ...fresh.filter(
-        (effect) =>
-          effect.action !== "none" &&
-          effect.square !== undefined &&
-          (latestPly === undefined || effect.ply === latestPly),
-      ),
-    ].slice(-3);
-    if (!active || (latestPly !== undefined && active.ply !== latestPly))
-      setActive(queue.current.shift() ?? null);
-  }, [active, effects, gameId, latestPly, layoutKey, reduced, visible]);
+    if (scheduled && latestPly !== undefined && scheduled.effect.ply !== latestPly)
+      setScheduled(null);
+    const candidate = fresh.findLast(
+      (effect) =>
+        effect.action !== "none" &&
+        effect.square !== undefined &&
+        (latestPly === undefined || effect.ply === latestPly),
+    );
+    if (candidate) {
+      setPhase("waiting");
+      setScheduled({ effect: candidate, startsAt });
+    }
+  }, [scheduled, effects, gameId, latestPly, layoutKey, startsAt, reduced, visible]);
 
   useLayoutEffect(() => {
-    if (!active) return;
-    setPhase("arrive");
-    const paw = window.setTimeout(() => setPhase("paw"), CAT_PAW_MS);
-    const exit = window.setTimeout(() => setPhase("exit"), 820);
-    const complete = window.setTimeout(() => setActive(null), CAT_VISIT_MS);
+    if (!scheduled) return;
+    const delay = Math.max(0, scheduled.startsAt - performance.now());
+    setPhase(delay > 0 ? "waiting" : "arrive");
+    const arrive = window.setTimeout(() => setPhase("arrive"), delay);
+    const paw = window.setTimeout(() => setPhase("paw"), delay + CAT_PAW_MS);
+    const exit = window.setTimeout(() => setPhase("exit"), delay + CAT_EXIT_MS);
+    const complete = window.setTimeout(() => setScheduled(null), delay + CAT_VISIT_MS);
     return () => {
+      window.clearTimeout(arrive);
       window.clearTimeout(paw);
       window.clearTimeout(exit);
       window.clearTimeout(complete);
     };
-  }, [active]);
+  }, [scheduled]);
 
-  return { active, phase, announcement };
+  return {
+    effect: scheduled?.effect ?? null,
+    active: phase === "waiting" ? null : (scheduled?.effect ?? null),
+    phase,
+    announcement,
+  };
 }
 
 export function CatVisit({

@@ -12,6 +12,7 @@ import {
   createSearchPosition,
   prepareSearchMove,
   searchChanceChoices,
+  searchExchangeGain,
   searchLegalMoves,
   searchOutcome,
   searchRepetitionCount,
@@ -159,4 +160,29 @@ describe("browser-safe search and durable rules parity", () => {
       expect(JSON.stringify(replay)).not.toContain('"draw"');
       expect(replay.positions.at(-1)?.move).toEqual(inspectEngine(state).moves.at(-1));
     });
+});
+
+describe("bounded legal exchange estimates", () => {
+  const position = (fen: string, mode: RulesetId = "standard") =>
+    createSearchPosition(getEngineSearchPosition(createEngineState(mode, fen)));
+
+  it("recognizes a queen lost to a pawn recapture", () => {
+    expect(searchExchangeGain(position("4k3/8/8/4p3/5Q2/8/8/4K3 b - - 0 1"), "f4")).toBe(900);
+  });
+  it("does not treat a pinned pawn as a legal defender", () => {
+    expect(searchExchangeGain(position("4k3/4p3/3Q4/8/8/8/8/4R1K1 b - - 0 1"), "d6")).toBe(0);
+  });
+  it("allows declining a losing rook-for-knight exchange", () => {
+    expect(searchExchangeGain(position("3r2k1/8/8/8/3N4/2P5/8/6K1 b - - 0 1"), "d4")).toBe(0);
+  });
+  it("rejects a king recapture onto a defended square", () => {
+    expect(searchExchangeGain(position("4k3/4Q3/8/8/8/8/4R3/6K1 b - - 0 1"), "e7")).toBe(0);
+  });
+  it("preserves the real position and bounds longer exchange chains", () => {
+    const board = position("3r2k1/8/8/8/3Q4/2P5/8/6K1 b - - 0 1");
+    const fen = board.chess.fen();
+    expect(searchExchangeGain(board, "d4")).toBe(400);
+    expect(searchExchangeGain(board, "d4", 1)).toBe(900);
+    expect(board.chess.fen()).toBe(fen);
+  });
 });
